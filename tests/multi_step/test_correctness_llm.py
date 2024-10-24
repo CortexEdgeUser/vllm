@@ -350,3 +350,123 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             name_0="multi-step",
             name_1="multi-step+features",
         )
+
+from vllm.sampling_params import SamplingParams
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
+@pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("max_output_len", [7])
+@pytest.mark.parametrize("n,best_of", [
+    (1, 2),
+    (2, 2),
+    (2, 3),
+])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_multi_step_llm_best_of_fallback(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    tp_size: int,
+    enforce_eager: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    max_output_len: int,
+    n: int,
+    best_of: int,
+    enable_chunked_prefill: bool,
+    enable_prefix_caching: bool,
+) -> None:
+    """Test vLLM engine with multi-step & best_of > 1
+
+    Currently multi-step scheduling does not support best_of > 1 or beam search,
+    however the default behavior is for the engine to fall back on single-step
+    scheduling rather than failing.
+
+    Two instantiations of the sync vLLM engine are tested, one with single-step
+    and one with multi-step scheduling.
+
+    Each instantiation of vLLM is tested in 3 phases:
+    1. Batch of requests without best_of > 1
+    2. Batch of requests with best_of > 1
+    3. Batch of requests without best_of > 1
+
+    For the instantiation of vLLM with multi-step scheduling, Phase 1 should use
+    multi-step scheduling, Phase 2 should fall back on single-step scheduling,
+    and Phase 3 should resume multi-step scheduling.
+
+    The other instantiation should use single-step scheduling for all phases.
+
+    Args:
+      vllm_runner: vLLM model runner fixture
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      dtype: tensor datatype for engine to utilize
+      tp_size: degree of tensor-parallelism
+      enforce_eager
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      max_output_len: the maximum number of tokens to generate
+      n: num seqs to output per :class:`SequenceGroup`
+      best_of: num seqs per :class:`SequenceGroup` from which to choose
+      enable_chunked_prefill
+      enable_prefix_caching
+    """
+
+    prompts = example_prompts
+    if len(prompts) < num_prompts:
+        prompts = prompts * ((num_prompts // len(prompts)) + 1)
+    prompts = prompts[:num_prompts]
+    assert len(prompts) == num_prompts
+
+    # Sampling parameters with best_of > 1 which should trigger a
+    # multi-step scheduler to fall back on single-step scheduling
+    sampling_params_best_of_gt_1 = SamplingParams(
+        max_tokens=max_output_len,
+        ignore_eos=True,
+        temperature=1.0,
+        n=n,
+        best_of=best_of,
+        seed=42,
+    )
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
+            num_scheduler_steps=1,
+            enable_chunked_prefill=enable_chunked_prefill,
+            enable_prefix_caching=enable_prefix_caching,
+    ) as vllm_model:
+        outputs_ss_best_of_gt_1 = vllm_model.generate(
+            prompts, sampling_params_best_of_gt_1)
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
+            num_scheduler_steps=num_scheduler_steps,
+            enable_chunked_prefill=enable_chunked_prefill,
+            enable_prefix_caching=enable_prefix_caching,
+    ) as vllm_model:
+        outputs_ms_best_of_gt_1 = (vllm_model.generate(
+            prompts, sampling_params_best_of_gt_1))
+
+    check_outputs_equal(
+        outputs_0_lst=outputs_ss_best_of_gt_1,
+        outputs_1_lst=outputs_ms_best_of_gt_1,
+        name_0="outputs_ss_best_of_gt_1",
+        name_1="outputs_ms_best_of_gt_1",
+    )
