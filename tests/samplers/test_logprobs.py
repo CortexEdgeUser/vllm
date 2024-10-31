@@ -5,6 +5,8 @@ import torch
 
 from vllm import SamplingParams
 
+from tests.kernels.utils import override_backend_env_variable
+
 from ..conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
@@ -12,7 +14,7 @@ MODELS = ["facebook/opt-125m"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
-                         ["float"])  # needed for comparing logprobs with HF
+                         ["half"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [0, 6])  # 32000 == vocab_size
 @pytest.mark.parametrize("detokenize", [True, False])
@@ -32,6 +34,7 @@ def test_get_prompt_logprobs(
     if vllm_use_v1:
         # LLM engine v1
         monkeypatch.setenv("VLLM_USE_V1", "1")
+        override_backend_env_variable(monkeypatch, "FLASH_ATTN")
     else:
         # LLM engine v0
         monkeypatch.setenv("VLLM_USE_V1", "0")
