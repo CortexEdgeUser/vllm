@@ -34,7 +34,7 @@ def test_get_prompt_logprobs(
     if vllm_use_v1:
         # LLM engine v1
         monkeypatch.setenv("VLLM_USE_V1", "1")
-        override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+        override_backend_env_variable(monkeypatch, "FLASHINFER")
     else:
         # LLM engine v0
         monkeypatch.setenv("VLLM_USE_V1", "0")
