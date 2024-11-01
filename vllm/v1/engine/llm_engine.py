@@ -393,6 +393,8 @@ class LLMEngine:
         finished: bool,
     ) -> RequestOutput:
         req_output = self.request_outputs.get(request.request_id)
+        do_logprobs = request.max_logprobs is not None
+        do_prompt_logprobs = request.max_prompt_logprobs is not None
         if req_output is None:
             # TODO: Support `n` > 1.
             completion_output = CompletionOutput(
@@ -400,7 +402,7 @@ class LLMEngine:
                 text="",
                 token_ids=[],
                 cumulative_logprob=None,
-                logprobs=None,  # TODO
+                logprobs=[] if do_logprobs else None,
                 finish_reason=None,
                 stop_reason=None,
                 lora_request=None,
@@ -409,7 +411,7 @@ class LLMEngine:
                 request_id=request.request_id,
                 prompt=request.prompt,
                 prompt_token_ids=request.prompt_token_ids,
-                prompt_logprobs=None,  # TODO
+                prompt_logprobs=[] if do_prompt_logprobs else None,
                 outputs=[completion_output],
                 finished=False,
                 metrics=None,
@@ -424,19 +426,29 @@ class LLMEngine:
             completion_output.text += new_output_text
             completion_output.token_ids = (
                 request.output_token_ids[:num_output_tokens])
+            if do_logprobs:
+                completion_output.logprobs = (
+                    request.logprobs[:num_output_tokens])
         elif request.sampling_params.output_kind == RequestOutputKind.DELTA:
             completion_output.text = new_output_text
             num_prev_tokens = len(completion_output.token_ids)
             completion_output.token_ids = request.output_token_ids[
                 num_prev_tokens:num_output_tokens]
+            if do_logprobs:
+                completion_output.logprobs = (
+                    request.logprobs[num_prev_tokens:num_output_tokens])
         elif (request.sampling_params.output_kind ==
               RequestOutputKind.FINAL_ONLY):
             if finished:
                 completion_output.text = request.output_text
                 completion_output.token_ids = request.output_token_ids
+                if do_logprobs:
+                    completion_output.logprobs = request.logprobs
             else:
                 completion_output.text = ""
                 completion_output.token_ids = []
+                if do_logprobs:
+                    completion_output.logprobs = []
 
         if finished:
             completion_output.finish_reason = request.get_finished_reason()
