@@ -257,9 +257,11 @@ class Scheduler:
                     # Construct logprobs, if requested
                     logprob_token_ids = logprob_token_ids_list[req_index]
                     logprob_values = logprob_values_list[req_index]
-                    logprobs = {(idx + 1): Logprob(lpv, (idx + 1), token_id)
-                                for idx, (lpv, lpt) in enumerate(
-                                    zip(logprob_values, logprob_token_ids))}
+                    logprobs = {
+                        lpt: Logprob(lpv, (idx + 1), None)
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(logprob_values, logprob_token_ids))
+                    }
                     request.logprobs.append(logprobs)
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
