@@ -6,6 +6,7 @@ from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import Logprob
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -230,6 +231,12 @@ class Scheduler:
     ) -> List[Tuple[Request, int]]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        do_logprobs = not (model_runner_output.logprob_token_ids_cpu is None
+                           or model_runner_output.logprobs_cpu is None)
+        if do_logprobs:
+            logprob_token_ids_list = (
+                model_runner_output.logprob_token_ids_cpu.tolist())
+            logprob_values_list = (model_runner_output.logprobs_cpu.tolist())
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         # (request, num_sampled_tokens)
@@ -246,6 +253,14 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
+                if do_logprobs and request.max_logprobs is not None:
+                    # Construct logprobs, if requested
+                    logprob_token_ids = logprob_token_ids_list[req_index]
+                    logprob_values = logprob_values_list[req_index]
+                    logprobs = {(idx + 1): Logprob(lpv, (idx + 1), token_id)
+                                for idx, (lpv, lpt) in enumerate(
+                                    zip(logprob_values, logprob_token_ids))}
+                    request.logprobs.append(logprobs)
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.

@@ -3,9 +3,8 @@ from typing import List
 import pytest
 import torch
 
-from vllm import SamplingParams
-
 from tests.kernels.utils import override_backend_env_variable
+from vllm import SamplingParams
 
 from ..conftest import VllmRunner
 

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
+from vllm.sequence import PromptLogprobs, RequestMetrics, SampleLogprobs
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
@@ -18,6 +18,8 @@ class Request:
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
+        max_logprobs: Optional[int],
+        max_prompt_logprobs: Optional[int],
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -42,6 +44,12 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self.output_token_ids: List[int] = []
         self.output_text = ""
+        self.max_logprobs = max_logprobs
+        self.max_prompt_logprobs = max_prompt_logprobs
+        self.logprobs: Optional[SampleLogprobs] = (None if max_logprobs is None
+                                                   else [])
+        self.prompt_logprobs: Optional[PromptLogprobs] = (
+            None if max_prompt_logprobs is None else [])
         self.num_computed_tokens = 0
 
     @property
