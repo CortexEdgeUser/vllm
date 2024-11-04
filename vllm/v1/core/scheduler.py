@@ -258,7 +258,7 @@ class Scheduler:
                     logprob_token_ids = logprob_token_ids_list[req_index]
                     logprob_values = logprob_values_list[req_index]
                     logprobs = {
-                        lpt: Logprob(lpv, (idx + 1), None)
+                        lpt: Logprob(lpv, (idx + 1), lpt)
                         for idx, (lpv, lpt) in enumerate(
                             zip(logprob_values, logprob_token_ids))
                     }
