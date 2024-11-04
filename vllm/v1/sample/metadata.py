@@ -19,3 +19,4 @@ class SamplingMetadata:
     generators: Dict[int, torch.Generator]
 
     max_num_logprobs: int
+    max_num_prompt_logprobs: int

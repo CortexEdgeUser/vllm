@@ -35,3 +35,8 @@ class ModelRunnerOutput:
     logprob_token_ids_cpu: Optional[torch.Tensor]
     # [num_reqs, max_num_logprobs + 1]
     logprobs_cpu: Optional[torch.Tensor]
+
+    # [num_reqs, max_num_prompt_logprobs]
+    prompt_logprob_token_ids_cpu: Optional[torch.Tensor]
+    # [num_reqs, max_num_prompt_logprobs]
+    prompt_logprobs_cpu: Optional[torch.Tensor]

@@ -320,15 +320,33 @@ class GPUModelRunner:
                 kv_caches=self.kv_caches,
                 attn_metadata=attn_metadata,
             )
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
-
-        # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+
+        if sampling_metadata.max_num_logprobs > 0:
+            # One or more requests require prompt logprobs
+            hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(hidden_states, None)
+
+            # Sample the next token and get logprobs if needed.
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            # No requests require prompt logprobs
+            logits = self.model.compute_logits(hidden_states, None)
+            mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
+            mask[logits_indices] = False
+            prompt_logits = logits[mask,:]
+            logits = logits[logits_indices,:]
+
+            # Sample the next token and get logprobs if needed.
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+                prompt_logits=prompt_logits
+            )
+
 
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
@@ -361,12 +379,24 @@ class GPUModelRunner:
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        if sampler_output.prompt_logprob_token_ids is None:
+            prompt_logprob_token_ids = None
+        else:
+            prompt_logprob_token_ids = (
+                sampler_output.prompt_logprob_token_ids.cpu())
+        if sampler_output.prompt_logprobs is None:
+            prompt_logprobs = None
+        else:
+            prompt_logprobs = sampler_output.prompt_logprobs.cpu()
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
+            prompt_logprob_token_ids_cpu=prompt_logprob_token_ids,
+            prompt_logprobs_cpu=prompt_logprobs
         )
         return model_runner_output
 
@@ -503,6 +533,7 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
     def add_request(
@@ -548,8 +579,11 @@ class InputBatch:
         self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
+        num_prompt_logprobs = sampling_params.prompt_logprobs
         if num_logprobs is not None and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
+        if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
+            self.num_prompt_logprobs[req_id] = num_prompt_logprobs
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
@@ -565,6 +599,7 @@ class InputBatch:
         self.top_k_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.num_prompt_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
         return req_index
 
@@ -577,6 +612,7 @@ class InputBatch:
         self.top_k_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
+        self.num_prompt_logprobs.clear()
         self.prompt_logprob_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
@@ -643,6 +679,7 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            max_num_prompt_logprobs=self.max_num_prompt_logprobs
         )
 
     @property
@@ -668,6 +705,11 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
+    
+    @property
+    def max_num_prompt_logprobs(self) -> int:
+        return (max(self.num_prompt_logprobs.values()) 
+                if self.num_prompt_logprobs else 0)
 
     @property
     def no_logprob(self) -> bool:
