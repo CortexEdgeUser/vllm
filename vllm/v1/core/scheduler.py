@@ -2,6 +2,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+import torch
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
@@ -260,29 +262,42 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
-                if request.max_logprobs > 0:
-                    # Construct logprobs, if requested
+                max_logprobs = request.max_logprobs
+                if max_logprobs > 0:
+                    # Construct logprobs, if requested (TODO: assumes one
+                    # generated token). Note that Sampler returns
+                    #
+                    # logprob_token_ids =
+                    #   <(batch max logprobs) tok ids><sampled tok id>
+                    # logprob_values =
+                    #   <(batch max logprobs) tok logprobs><sampled tok logprob>
                     logprob_token_ids = logprob_token_ids_list[req_index]
                     logprob_values = logprob_values_list[req_index]
-                    logprobs = {
+                    logprob_cnt = max_logprobs
+                    if token_id not in logprob_token_ids[0:max_logprobs]:
+                        # Sampled token is not in the in the top logprobs;
+                        # inject it & resort, ensuring that excess logprobs
+                        # not requested by the user have -inf probability
+                        logprob_values[max_logprobs:-1] = (
+                            [float('-inf')] *
+                            (len(logprob_values) - 1 - max_logprobs))
+                        logprob_values, indices = torch.sort(logprob_values,
+                                                             dim=-1)
+                        logprob_token_ids = torch.gather(
+                            logprob_token_ids, 1, indices)
+                        # There will be one more logprob than the user requested
+                        logprob_cnt = max_logprobs + 1
+
+                    # Only keep the number of logprobs specified by the request
+                    # (plus possibly the sampled token id & its logprob)
+                    logprob_values = logprob_values[0:logprob_cnt]
+                    logprob_token_ids = logprob_token_ids[0:logprob_cnt]
+
+                    request.logprobs.append({
                         lpt: Logprob(lpv, (idx + 1), None)
                         for idx, (lpv, lpt) in enumerate(
                             zip(logprob_values, logprob_token_ids))
-                    }
-                    request.logprobs.append(logprobs)
-                if request.max_prompt_logprobs > 0:
-                    # Construct prompt logprobs, if requested
-                    prompt_logprob_token_ids = prompt_logprob_token_ids_list[
-                        req_index]
-                    prompt_logprob_values = prompt_logprob_values_list[
-                        req_index]
-                    prompt_logprobs = {
-                        lpt: Logprob(lpv, (idx + 1), None)
-                        for idx, (lpv, lpt) in enumerate(
-                            zip(prompt_logprob_values,
-                                prompt_logprob_token_ids))
-                    }
-                    request.prompt_logprobs.append(prompt_logprobs)
+                    })
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
@@ -291,6 +306,18 @@ class Scheduler:
                 stopped = self._check_stop(request)
                 if stopped:
                     continue
+
+            if request.max_prompt_logprobs > 0:
+                # Construct prompt logprobs, if requested
+                prompt_logprob_token_ids = prompt_logprob_token_ids_list[
+                    req_index]
+                prompt_logprob_values = prompt_logprob_values_list[req_index]
+                prompt_logprobs = {
+                    lpt: Logprob(lpv, (idx + 1), None)
+                    for idx, (lpv, lpt) in enumerate(
+                        zip(prompt_logprob_values, prompt_logprob_token_ids))
+                }
+                request.prompt_logprobs.append(prompt_logprobs)
 
             new_running.append(request)
         self.running = new_running

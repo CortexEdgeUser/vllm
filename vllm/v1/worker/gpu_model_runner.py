@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 from unittest.mock import patch
 
 import numpy as np
@@ -304,6 +304,34 @@ class GPUModelRunner:
         sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
         return sampling_metadata
 
+    def _compute_prompt_logprobs(
+        self,
+        sampling_metadata: SamplingMetadata,
+        prompt_logits: Optional[torch.Tensor],
+        seq_start_loc: torch.Tensor,
+        num_generated_tokens: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Compute prompt lens
+        prompt_lens = torch.diff(seq_start_loc) - num_generated_tokens
+
+        max_num_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs
+        assert max_num_prompt_logprobs > 0
+
+        prompt_logits = self.model.sampler.apply_temperature(
+            prompt_logits,
+            torch.repeat_interleave(sampling_metadata.temperature,
+                                    prompt_lens))
+        prompt_logits = self.model.sampler.apply_top_k_top_p(
+            prompt_logits, sampling_metadata)
+        prompt_logprobs = self.model.sampler.get_logprobs(prompt_logits)
+
+        topk_prompt_logprobs, topk_prompt_indices = torch.topk(
+            prompt_logprobs, sampling_metadata.max_num_prompt_logprobs, dim=-1)
+        # Use int32 to reduce the tensor size.
+        topk_prompt_indices = topk_prompt_indices.to(torch.int32)
+
+        return topk_prompt_indices, topk_prompt_logprobs
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -321,30 +349,29 @@ class GPUModelRunner:
                 attn_metadata=attn_metadata,
             )
         sampling_metadata = self._prepare_sampling(scheduler_output)
-
-        if sampling_metadata.max_num_logprobs > 0:
+        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
+        if do_prompt_logprobs:
             # One or more requests require prompt logprobs
-            hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(hidden_states, None)
-
-            # Sample the next token and get logprobs if needed.
-            sampler_output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        else:
-            # No requests require prompt logprobs
             logits = self.model.compute_logits(hidden_states, None)
             mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
             mask[logits_indices] = False
             prompt_logits = logits[mask, :]
             logits = logits[logits_indices, :]
+            (
+                prompt_logprob_token_ids,
+                prompt_logprobs,
+            ) = self._compute_prompt_logprobs(sampling_metadata, prompt_logits,
+                                              attn_metadata.seq_start_loc, 1)
+        else:
+            # No requests require prompt logprobs
+            hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(hidden_states, None)
 
-            # Sample the next token and get logprobs if needed.
-            sampler_output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-                prompt_logits=prompt_logits)
+        # Sample the next token and get logprobs if needed.
+        sampler_output = self.model.sample(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+        )
 
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
@@ -378,15 +405,13 @@ class GPUModelRunner:
         else:
             logprobs = sampler_output.logprobs.cpu()
 
-        if sampler_output.prompt_logprob_token_ids is None:
+        if do_prompt_logprobs:
+            prompt_logprob_token_ids = prompt_logprob_token_ids.cpu()
+            prompt_logprobs = prompt_logprobs.cpu()
+        else:
             prompt_logprob_token_ids = None
-        else:
-            prompt_logprob_token_ids = (
-                sampler_output.prompt_logprob_token_ids.cpu())
-        if sampler_output.prompt_logprobs is None:
             prompt_logprobs = None
-        else:
-            prompt_logprobs = sampler_output.prompt_logprobs.cpu()
+
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,

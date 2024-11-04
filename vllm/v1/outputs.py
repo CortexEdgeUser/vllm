@@ -15,10 +15,6 @@ class SamplerOutput:
     # [num_reqs, max_num_logprobs + 1]
     logprobs: Optional[torch.Tensor]
 
-    # TODO: Support prompt logprobs.
-    prompt_logprob_token_ids: Optional[torch.Tensor]
-    prompt_logprobs: Optional[torch.Tensor]
-
 
 @dataclass
 class ModelRunnerOutput:
