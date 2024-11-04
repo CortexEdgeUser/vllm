@@ -231,12 +231,19 @@ class Scheduler:
     ) -> List[Tuple[Request, int]]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
-        do_logprobs = not (model_runner_output.logprob_token_ids_cpu is None
-                           or model_runner_output.logprobs_cpu is None)
+        do_logprobs = model_runner_output.logprobs_cpu is not None
+        do_prompt_logprobs = model_runner_output.prompt_logprobs_cpu is not None
         if do_logprobs:
+            assert model_runner_output.logprob_token_ids_cpu is not None
             logprob_token_ids_list = (
                 model_runner_output.logprob_token_ids_cpu.tolist())
             logprob_values_list = (model_runner_output.logprobs_cpu.tolist())
+        if do_prompt_logprobs:
+            assert model_runner_output.prompt_logprob_token_ids_cpu is not None
+            prompt_logprob_token_ids_list = (
+                model_runner_output.prompt_logprob_token_ids_cpu.tolist())
+            prompt_logprob_values_list = (
+                model_runner_output.prompt_logprobs_cpu.tolist())
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         # (request, num_sampled_tokens)
@@ -253,7 +260,7 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
-                if do_logprobs and request.max_logprobs is not None:
+                if request.max_logprobs > 0:
                     # Construct logprobs, if requested
                     logprob_token_ids = logprob_token_ids_list[req_index]
                     logprob_values = logprob_values_list[req_index]
@@ -263,6 +270,19 @@ class Scheduler:
                             zip(logprob_values, logprob_token_ids))
                     }
                     request.logprobs.append(logprobs)
+                if request.max_prompt_logprobs > 0:
+                    # Construct prompt logprobs, if requested
+                    prompt_logprob_token_ids = prompt_logprob_token_ids_list[
+                        req_index]
+                    prompt_logprob_values = prompt_logprob_values_list[
+                        req_index]
+                    prompt_logprobs = {
+                        lpt: Logprob(lpv, (idx + 1), None)
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(prompt_logprob_values,
+                                prompt_logprob_token_ids))
+                    }
+                    request.prompt_logprobs.append(prompt_logprobs)
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
