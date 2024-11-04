@@ -337,16 +337,14 @@ class GPUModelRunner:
             logits = self.model.compute_logits(hidden_states, None)
             mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
             mask[logits_indices] = False
-            prompt_logits = logits[mask,:]
-            logits = logits[logits_indices,:]
+            prompt_logits = logits[mask, :]
+            logits = logits[logits_indices, :]
 
             # Sample the next token and get logprobs if needed.
             sampler_output = self.model.sample(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
-                prompt_logits=prompt_logits
-            )
-
+                prompt_logits=prompt_logits)
 
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
@@ -396,8 +394,7 @@ class GPUModelRunner:
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
             prompt_logprob_token_ids_cpu=prompt_logprob_token_ids,
-            prompt_logprobs_cpu=prompt_logprobs
-        )
+            prompt_logprobs_cpu=prompt_logprobs)
         return model_runner_output
 
     def load_model(self) -> None:
@@ -679,8 +676,7 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            max_num_prompt_logprobs=self.max_num_prompt_logprobs
-        )
+            max_num_prompt_logprobs=self.max_num_prompt_logprobs)
 
     @property
     def num_reqs(self) -> int:
@@ -705,10 +701,10 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
-    
+
     @property
     def max_num_prompt_logprobs(self) -> int:
-        return (max(self.num_prompt_logprobs.values()) 
+        return (max(self.num_prompt_logprobs.values())
                 if self.num_prompt_logprobs else 0)
 
     @property

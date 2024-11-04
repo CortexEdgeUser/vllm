@@ -40,14 +40,16 @@ class Sampler(nn.Module):
 
         max_num_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs
         if max_num_prompt_logprobs > 0:
-            prompt_logits = self.apply_temperature(prompt_logits, 
-                                                   sampling_metadata.temperature)
-            prompt_logits = self.apply_top_k_top_p(prompt_logits, 
+            prompt_logits = self.apply_temperature(
+                prompt_logits, sampling_metadata.temperature)
+            prompt_logits = self.apply_top_k_top_p(prompt_logits,
                                                    sampling_metadata)
             prompt_logprobs = self.get_logprobs(prompt_logits)
 
             topk_prompt_logprobs, topk_prompt_indices = torch.topk(
-                prompt_logprobs, sampling_metadata.max_num_prompt_logprobs, dim=-1)
+                prompt_logprobs,
+                sampling_metadata.max_num_prompt_logprobs,
+                dim=-1)
             # Use int32 to reduce the tensor size.
             topk_prompt_indices = topk_prompt_indices.to(torch.int32)
 
