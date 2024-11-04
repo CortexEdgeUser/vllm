@@ -16,6 +16,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
@@ -315,6 +316,8 @@ class LLMEngine:
             skip_special_tokens=[],
             spaces_between_special_tokens=[],
             free_req_ids=[],  # TODO(woosuk): Implement freeing.
+            logprobs={},
+            prompt_logprobs={},
         )
         for req, num_tokens in sampled:
             inputs.req_ids.append(req.request_id)
@@ -329,6 +332,13 @@ class LLMEngine:
                 req.sampling_params.skip_special_tokens)
             inputs.spaces_between_special_tokens.append(
                 req.sampling_params.spaces_between_special_tokens)
+
+            # Transmit (prompt)logprobs to detokenizer
+            req_id = req.request_id
+            if req.logprobs is not None:
+                inputs.logprobs[req_id] = req.logprobs
+            if req.prompt_logprobs is not None:
+                inputs.prompt_logprobs[req_id] = req.prompt_logprobs
 
             # Update the number of lagged steps.
             self.num_lagged_steps[req.request_id] += 1
@@ -356,7 +366,9 @@ class LLMEngine:
                         and req.is_finished())
             req_output = self._make_request_output(
                 req, detokenizer_output.num_output_token_ids[i],
-                detokenizer_output.detokenized_texts[i], finished)
+                detokenizer_output.detokenized_texts[i],
+                detokenizer_output.logprobs.get(req_id, None),
+                detokenizer_output.prompt_logprobs.get(req_id, None), finished)
             req_outputs.append(req_output)
 
             if finished:
@@ -371,6 +383,8 @@ class LLMEngine:
         request: Request,
         num_output_tokens: int,
         new_output_text: str,
+        logprobs: Optional[SampleLogprobs],
+        prompt_logprobs: Optional[PromptLogprobs],
         finished: bool,
     ) -> RequestOutput:
         req_output = self.request_outputs.get(request.request_id)
@@ -408,8 +422,7 @@ class LLMEngine:
             completion_output.token_ids = (
                 request.output_token_ids[:num_output_tokens])
             if do_logprobs:
-                completion_output.logprobs = (
-                    request.logprobs[:num_output_tokens])
+                completion_output.logprobs = (logprobs[:num_output_tokens])
         elif request.sampling_params.output_kind == RequestOutputKind.DELTA:
             completion_output.text = new_output_text
             num_prev_tokens = len(completion_output.token_ids)
@@ -417,14 +430,14 @@ class LLMEngine:
                 num_prev_tokens:num_output_tokens]
             if do_logprobs:
                 completion_output.logprobs = (
-                    request.logprobs[num_prev_tokens:num_output_tokens])
+                    logprobs[num_prev_tokens:num_output_tokens])
         elif (request.sampling_params.output_kind ==
               RequestOutputKind.FINAL_ONLY):
             if finished:
                 completion_output.text = request.output_text
                 completion_output.token_ids = request.output_token_ids
                 if do_logprobs:
-                    completion_output.logprobs = request.logprobs
+                    completion_output.logprobs = logprobs
             else:
                 completion_output.text = ""
                 completion_output.token_ids = []

@@ -1,15 +1,18 @@
 import multiprocessing
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import msgspec
 import zmq
 from msgspec import msgpack
 
+from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_port
+
+AnyLogprobs = Union[Optional[SampleLogprobs], Optional[PromptLogprobs]]
 
 
 class DetokenizerInputs(msgspec.Struct):
@@ -22,6 +25,13 @@ class DetokenizerInputs(msgspec.Struct):
     new_token_ids: List[List[int]]
     skip_special_tokens: List[bool]
     spaces_between_special_tokens: List[bool]
+
+    # If (prompt)logprobs are going to be returned, the decoded token
+    # field must be computed (detokenized) from the logprob token id.
+    # Assumption: the decoded token fields of the (prompt)logprobs
+    # is `None`
+    logprobs: Dict[str, SampleLogprobs]
+    prompt_logprobs: Dict[str, PromptLogprobs]
 
     # [num_free_reqs]
     free_req_ids: List[str]
@@ -38,6 +48,14 @@ class DetokenizerOutputs(msgspec.Struct):
     # asynchronously updated in the engine, while RequestOutput requires the
     # output token ids to be consistent with the detokenized text.
     num_output_token_ids: List[int]
+
+    # (prompt)logprobs outputs are `None` unless un-detokenized (prompt)logprobs
+    # were not provided as input.
+    # Unlike the input logprobs, the decoded token fields of the
+    # (prompt)logprobs (if not `None`) will be the decoded string representation
+    # of the logprob token id
+    logprobs: Dict[str, SampleLogprobs]
+    prompt_logprobs: Dict[str, PromptLogprobs]
 
 
 class Detokenizer:
@@ -117,6 +135,8 @@ class DetokenizerProc(multiprocessing.Process):
             for req_id in inputs.free_req_ids:
                 self.free(req_id)
 
+            detokenized_logprobs: Dict[str, SampleLogprobs] = {}
+            detokenized_prompt_logprobs: Dict[str, PromptLogprobs] = {}
             detokenized_texts: List[str] = []
             num_output_token_ids: List[int] = []
             num_reqs = len(inputs.req_ids)
@@ -132,6 +152,23 @@ class DetokenizerProc(multiprocessing.Process):
                     )
                 new_str = self.detokenize(req_id, inputs.new_token_ids[i])
                 detokenized_texts.append(new_str)
+                if req_id in inputs.logprobs:
+                    # If there are logprobs associated with this request,
+                    # detokenize them
+                    self.modify_logprobs_in_place(
+                        req_id,
+                        inputs.logprobs[req_id],
+                    )
+                    detokenized_logprobs[req_id] = inputs.logprobs[req_id]
+                if req_id in inputs.prompt_logprobs:
+                    # If there are prompt logprobs associated with this request,
+                    # detokenize them
+                    self.modify_logprobs_in_place(
+                        req_id,
+                        inputs.prompt_logprobs[req_id],
+                    )
+                    detokenized_prompt_logprobs[
+                        req_id] = inputs.prompt_logprobs[req_id]
                 req_state = self.request_states[req_id]
                 num_output_token_ids.append(
                     len(req_state.token_ids) - req_state.num_prompt_tokens)
@@ -140,7 +177,8 @@ class DetokenizerProc(multiprocessing.Process):
                 req_ids=inputs.req_ids,
                 detokenized_texts=detokenized_texts,
                 num_output_token_ids=num_output_token_ids,
-            )
+                logprobs=detokenized_logprobs,
+                prompt_logprobs=detokenized_prompt_logprobs)
             self.push_socket.send(self.msgpack_encoder.encode(detokenized),
                                   flags=zmq.NOBLOCK)
 
@@ -195,6 +233,47 @@ class DetokenizerProc(multiprocessing.Process):
             req_state.output_text += new_decoded_token_text
             decoded_text += new_decoded_token_text
         return decoded_text
+
+    def detokenize_logprob_in_place(
+        self,
+        skip_special_tokens: bool,
+        logprob_dict: Dict[int, Logprob],
+    ) -> None:
+        """Cmopute `decoded_token` by detokenizing a logprob's token id"""
+
+        for token_id in logprob_dict:
+            # Detokenize logprob for a particular top
+            # token at a particular token offset
+            logprob_dict[token_id].decoded_token = (
+                self.tokenizer.convert_ids_to_tokens(
+                    [token_id], skip_special_tokens=skip_special_tokens))[0]
+
+    def modify_logprobs_in_place(
+        self,
+        request_id: str,
+        logprobs: AnyLogprobs,
+    ) -> None:
+        """Compute (in-place) the `decoded_token` field of a request's logprobs
+
+        Behavior: for each token offset, for each top token,
+        compute `decoded_token` for that token.
+
+        Args:
+        request_id
+        logprobs_list: request logprobs
+        """
+
+        if logprobs is not None:
+            # Request has logprobs
+            req_state = self.request_states[request_id]
+            skip_special_tokens = req_state.skip_special_tokens
+            for logprob_dict in logprobs:
+                if logprob_dict is not None:
+                    # Logprobs at a token offset
+                    self.detokenize_logprob_in_place(
+                        skip_special_tokens,
+                        logprob_dict,
+                    )
 
 
 @dataclass
