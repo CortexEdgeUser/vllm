@@ -388,8 +388,8 @@ class LLMEngine:
         finished: bool,
     ) -> RequestOutput:
         req_output = self.request_outputs.get(request.request_id)
-        do_logprobs = request.max_logprobs is not None
-        do_prompt_logprobs = request.max_prompt_logprobs is not None
+        do_logprobs = request.max_logprobs > 0
+        do_prompt_logprobs = request.max_prompt_logprobs > 0
         if req_output is None:
             # TODO: Support `n` > 1.
             completion_output = CompletionOutput(
@@ -423,6 +423,8 @@ class LLMEngine:
                 request.output_token_ids[:num_output_tokens])
             if do_logprobs:
                 completion_output.logprobs = (logprobs[:num_output_tokens])
+            if do_prompt_logprobs:
+                req_output.prompt_logprobs = prompt_logprobs
         elif request.sampling_params.output_kind == RequestOutputKind.DELTA:
             completion_output.text = new_output_text
             num_prev_tokens = len(completion_output.token_ids)
@@ -431,6 +433,8 @@ class LLMEngine:
             if do_logprobs:
                 completion_output.logprobs = (
                     logprobs[num_prev_tokens:num_output_tokens])
+            if do_prompt_logprobs:
+                req_output.prompt_logprobs = prompt_logprobs
         elif (request.sampling_params.output_kind ==
               RequestOutputKind.FINAL_ONLY):
             if finished:
@@ -438,11 +442,15 @@ class LLMEngine:
                 completion_output.token_ids = request.output_token_ids
                 if do_logprobs:
                     completion_output.logprobs = logprobs
+                if do_prompt_logprobs:
+                    req_output.prompt_logprobs = prompt_logprobs
             else:
                 completion_output.text = ""
                 completion_output.token_ids = []
                 if do_logprobs:
                     completion_output.logprobs = []
+                if do_prompt_logprobs:
+                    req_output.prompt_logprobs = []
 
         if finished:
             completion_output.finish_reason = request.get_finished_reason()
