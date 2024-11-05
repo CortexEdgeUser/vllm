@@ -278,9 +278,8 @@ class Scheduler:
                         # Sampled token is not in the in the top logprobs;
                         # inject it & resort, ensuring that excess logprobs
                         # not requested by the user have -inf probability
-                        logprob_values[max_logprobs:-1] = (
-                            [float('-inf')] *
-                            (len(logprob_values) - 1 - max_logprobs))
+                        logprob_values[max_logprobs:-1] = ([float('-inf')]*
+                                                           (len(logprob_values)-1-max_logprobs))
                         logprob_values, indices = torch.sort(logprob_values,
                                                              dim=-1)
                         logprob_token_ids = torch.gather(
@@ -295,8 +294,9 @@ class Scheduler:
 
                     request.logprobs.append({
                         lpt: Logprob(lpv, (idx + 1), None)
-                        for idx, (lpv, lpt) in enumerate(
-                            zip(logprob_values, logprob_token_ids))
+                        for idx, (
+                            lpv, lpt) in enumerate(zip(logprob_values, 
+                                                       logprob_token_ids))
                     })
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
@@ -312,11 +312,11 @@ class Scheduler:
                 prompt_logprob_token_ids = prompt_logprob_token_ids_list[
                     req_index]
                 prompt_logprob_values = prompt_logprob_values_list[req_index]
-                prompt_logprobs = {
+                prompt_logprobs = [{
                     lpt: Logprob(lpv, (idx + 1), None)
                     for idx, (lpv, lpt) in enumerate(
                         zip(prompt_logprob_values, prompt_logprob_token_ids))
-                }
+                } for zip(prompt_logprob_values, prompt_logprob_token_ids)]
                 request.prompt_logprobs.append(prompt_logprobs)
 
             new_running.append(request)
