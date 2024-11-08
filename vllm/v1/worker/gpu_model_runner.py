@@ -357,11 +357,21 @@ class GPUModelRunner:
             mask[logits_indices] = False
             prompt_logits = logits[mask, :]
             logits = logits[logits_indices, :]
-            (
-                prompt_logprob_token_ids,
-                prompt_logprobs,
-            ) = self._compute_prompt_logprobs(sampling_metadata, prompt_logits,
-                                              attn_metadata.seq_start_loc, 1)
+
+            if prompt_logits.shape[0] > 0:
+                (
+                    prompt_logprob_token_ids,
+                    prompt_logprobs,
+                ) = self._compute_prompt_logprobs(sampling_metadata,
+                                                  prompt_logits,
+                                                  attn_metadata.seq_start_loc,
+                                                  1)
+            else:
+                prompt_logprob_token_ids = torch.empty(
+                    (0, sampling_metadata.max_num_prompt_logprobs),
+                    dtype=torch.int32)
+                prompt_logprobs = torch.empty(
+                    (0, sampling_metadata.max_num_prompt_logprobs))
         else:
             # No requests require prompt logprobs
             hidden_states = hidden_states[logits_indices]

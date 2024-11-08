@@ -233,8 +233,11 @@ class Scheduler:
     ) -> List[Tuple[Request, int]]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         do_logprobs = model_runner_output.logprobs_cpu is not None
-        do_prompt_logprobs = model_runner_output.prompt_logprobs_cpu is not None
+        do_prompt_logprobs = (model_runner_output.prompt_logprobs_cpu
+                              is not None
+                              and len(model_runner_output.logprobs_cpu) > 0)
         if do_logprobs:
             assert model_runner_output.logprob_token_ids_cpu is not None
             logprob_token_ids_list = (
@@ -246,7 +249,12 @@ class Scheduler:
                 model_runner_output.prompt_logprob_token_ids_cpu.tolist())
             prompt_logprob_values_list = (
                 model_runner_output.prompt_logprobs_cpu.tolist())
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+            prompt_lens = [
+                num_scheduled_tokens[req.request_id] - 1
+                for req in self.running
+                if req.num_computed_tokens < req.num_tokens
+            ]
+            curr_prompt_base_idx = 0
         new_running: List[Request] = []
         # (request, num_sampled_tokens)
         sampled: List[Tuple[Request, int]] = []
@@ -278,8 +286,9 @@ class Scheduler:
                         # Sampled token is not in the in the top logprobs;
                         # inject it & resort, ensuring that excess logprobs
                         # not requested by the user have -inf probability
-                        logprob_values[max_logprobs:-1] = ([float('-inf')]*
-                                                           (len(logprob_values)-1-max_logprobs))
+                        logprob_values[max_logprobs:-1] = (
+                            [float('-inf')] *
+                            (len(logprob_values) - 1 - max_logprobs))
                         logprob_values, indices = torch.sort(logprob_values,
                                                              dim=-1)
                         logprob_token_ids = torch.gather(
@@ -294,9 +303,8 @@ class Scheduler:
 
                     request.logprobs.append({
                         lpt: Logprob(lpv, (idx + 1), None)
-                        for idx, (
-                            lpv, lpt) in enumerate(zip(logprob_values, 
-                                                       logprob_token_ids))
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(logprob_values, logprob_token_ids))
                     })
                 request.output_token_ids.append(token_id)
                 sampled.append((request, 1))
@@ -309,15 +317,22 @@ class Scheduler:
 
             if request.max_prompt_logprobs > 0:
                 # Construct prompt logprobs, if requested
+                slice_upper_index = (curr_prompt_base_idx +
+                                     prompt_lens[req_index] + 1)
                 prompt_logprob_token_ids = prompt_logprob_token_ids_list[
-                    req_index]
-                prompt_logprob_values = prompt_logprob_values_list[req_index]
+                    curr_prompt_base_idx:slice_upper_index]
+                prompt_logprob_values = prompt_logprob_values_list[
+                    curr_prompt_base_idx:slice_upper_index]
+                curr_prompt_base_idx = slice_upper_index
+
                 prompt_logprobs = [{
                     lpt: Logprob(lpv, (idx + 1), None)
                     for idx, (lpv, lpt) in enumerate(
-                        zip(prompt_logprob_values, prompt_logprob_token_ids))
-                } for zip(prompt_logprob_values, prompt_logprob_token_ids)]
-                request.prompt_logprobs.append(prompt_logprobs)
+                        zip(plp_tok_values, plp_tok_token_ids))
+                } for plp_tok_values, plp_tok_token_ids in zip(
+                    prompt_logprob_values, prompt_logprob_token_ids)]
+
+                request.prompt_logprobs.extend(prompt_logprobs)
 
             new_running.append(request)
         self.running = new_running
