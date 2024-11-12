@@ -67,6 +67,8 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
+            max_logprobs=request.sampling_params.logprobs,
+            max_prompt_logprobs=request.sampling_params.prompt_logprobs,
         )
 
     @property
