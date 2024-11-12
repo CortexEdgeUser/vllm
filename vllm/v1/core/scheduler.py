@@ -281,6 +281,7 @@ class Scheduler:
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 max_logprobs = request.max_logprobs
+                max_prompt_logprobs = request.max_prompt_logprobs
                 if max_logprobs > 0:
                     # Construct logprobs, if requested (TODO: assumes one
                     # generated token). Note that Sampler returns
@@ -325,20 +326,33 @@ class Scheduler:
                 stopped = self._check_stop(request)
 
                 # Add EngineCoreOutput for this Request.
+                # Return the logprob for the most recently computed tokens.
+                # Return no prompt logprobs in decode-phase.
                 output = EngineCoreOutput(
                     request_id=req_id,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
+                    stop_reason=request.stop_reason,
+                    logprobs=request.logprobs[-num_new_tokens:]
+                    if max_logprobs > 0 else None,
+                    prompt_logprobs=[] if max_prompt_logprobs > 0 else None,
+                    prompt_logprobs_token_ids=[]
+                    if max_prompt_logprobs > 0 else None)
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
                     continue
 
-            if request.max_prompt_logprobs > 0:
-                # Construct prompt logprobs, if requested
+            elif max_prompt_logprobs > 0:
+                # Construct prompt logprobs, under the condition that
+                # (1) prompt logprobs were requested & (2) the request
+                # is still partial, i.e. prefill is still in-progress.
+                #
+                # Note that this scenario returns an EngineCoreOutput which is
+                # empty except for the prompt logprobs which were computed
+                # for these prompt tokens.
                 slice_upper_index = (curr_prompt_base_idx +
                                      prompt_lens[req_index] + 1)
                 prompt_logprob_token_ids = prompt_logprob_token_ids_list[
@@ -355,6 +369,23 @@ class Scheduler:
                     prompt_logprob_values, prompt_logprob_token_ids)]
 
                 request.prompt_logprobs.extend(prompt_logprobs)
+
+                prompt_slice_range_upper = request.num_computed_tokens
+                prompt_slice_range_lower = (prompt_slice_range_upper -
+                                            num_new_tokens)
+                engine_core_outputs.append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=request.
+                        output_token_ids[-num_new_tokens:],
+                        finished=request.is_finished(),
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason,
+                        logprobs=[] if max_logprobs > 0 else None,
+                        prompt_logprobs=prompt_logprobs,
+                        prompt_logprobs_token_ids=request.prompt_token_ids[
+                            prompt_slice_range_lower:prompt_slice_range_upper])
+                )
 
             new_running.append(request)
         self.running = new_running

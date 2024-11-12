@@ -34,6 +34,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
+    prompt_logprobs: Optional[PromptLogprobs]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -131,7 +132,8 @@ class RequestOutput:
             text=text,
             token_ids=token_ids,
             cumulative_logprob=None,
-            logprobs=None,  # TODO
+            logprobs=None,
+            prompt_logprobs=None,
         )
 
         return RequestOutput(

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -9,9 +9,11 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
 logger = init_logger(__name__)
 
+AnyLogprobs = Union[Optional[SampleLogprobs], Optional[PromptLogprobs]]
 
 @dataclass
 class IncrementalDetokenizer:
@@ -93,15 +95,62 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def add_tokens(
+    def detokenize_logprob_in_place(
+        self,
+        skip_special_tokens: bool,
+        logprob_dict: Dict[int, Logprob],
+    ) -> None:
+        """Cmopute `decoded_token` by detokenizing a logprob's token id"""
+
+        for token_id in logprob_dict:
+            # Detokenize logprob for a particular top
+            # token at a particular token offset
+            logprob_dict[token_id].decoded_token = (
+                self.tokenizer.convert_ids_to_tokens(
+                    [token_id], skip_special_tokens=skip_special_tokens))[0]
+
+    def modify_logprobs_in_place(
+        self,
+        request_id: str,
+        logprobs: AnyLogprobs,
+    ) -> None:
+        """Compute (in-place) the `decoded_token` field of a request's logprobs
+
+        Behavior: for each token offset, for each top token,
+        compute `decoded_token` for that token.
+
+        Args:
+        request_id
+        logprobs_list: request logprobs
+        """
+
+        if logprobs is not None:
+            # Request has logprobs
+            req_state = self.request_states[request_id]
+            skip_special_tokens = req_state.skip_special_tokens
+            for logprob_dict in logprobs:
+                if logprob_dict is not None:
+                    # Logprobs at a token offset
+                    self.detokenize_logprob_in_place(
+                        skip_special_tokens,
+                        logprob_dict,
+                    )
+
+
+    def add_tokens_maybe_logprobs(
         self,
         new_token_ids: List[int],
+        new_logprobs: Optional[SampleLogprobs],
+        new_prompt_logprobs: Optional[PromptLogprobs],
+        new_prompt_logprobs_token_ids: Optional[List[int]],
         finish_reason: Optional[str],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
+            1a) If necessary, detokenize logprobs incrementally
+            1b) If necessary, detokenize prompt logprobs incrementally
             2) Update the RequestOutput with the new text.
         """
 
@@ -129,6 +178,13 @@ class IncrementalDetokenizer:
             self.output_text += new_decoded_token_text
 
             decoded_text += new_decoded_token_text
+
+        # 1a) If necessary, detokenize logprobs incrementally
+        if new_logprobs is not None:
+            pass
+
+        # 1b) If necessary, detokenize prompt logprobs incrementally
+        if new_prompt_logprobs is not None:
 
         # 2) Evaluate stop criteria.
         if self.stop:
@@ -245,8 +301,11 @@ class Detokenizer:
                 continue
 
             # Detokenize and update state.
-            request_output = detokenizer.add_tokens(
+            request_output = detokenizer.add_tokens_maybe_logprobs(
                 new_token_ids=engine_core_output.new_token_ids,
+                new_logprobs=engine_core_output.logprobs,
+                new_prompt_logprobs=engine_core_output.prompt_logprobs,
+                new_prompt_logprobs_token_ids=engine_core_output.prompt_logprobs_token_ids,
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )
