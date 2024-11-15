@@ -51,8 +51,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.models.utils import LLMWrapper
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -383,11 +382,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         quant_config = vllm_config.quant_config
@@ -700,12 +695,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MiniCPMV2_0(MiniCPMVBaseModel):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__(vllm_config)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 0)
 
     def init_llm(
@@ -858,12 +849,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__(vllm_config)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 5)
 
     def init_llm(
@@ -1000,12 +987,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__(vllm_config)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 6)
 
     def init_llm(
@@ -1118,7 +1101,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __new__(cls, vllm_config: VllmConfig, prefix: str = ""):
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         if not hasattr(config, "version"):
             if config.hidden_size == 2304 and config.query_num == 64:
