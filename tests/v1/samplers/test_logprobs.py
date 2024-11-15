@@ -141,7 +141,11 @@ def test_get_prompt_logprobs(
             assert token_id in logprob_dict
 
 
-def test_max_logprobs():
+def test_max_logprobs(monkeypatch):
+    # LLM engine v1
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
@@ -156,7 +160,12 @@ def test_max_logprobs():
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
-                       detokenize: bool, example_prompts):
+                       detokenize: bool, example_prompts, monkeypatch):
+
+    # LLM engine v1
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+
     max_num_seqs = 256
     enable_chunked_prefill = False
     max_num_batched_tokens = None
@@ -174,11 +183,15 @@ def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
     ) as vllm_model:
         sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=None,
+                                                       prompt_logprobs=None,
                                                        temperature=0.0,
                                                        detokenize=detokenize)
         results_logprobs_none = vllm_model.model.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 
     for i in range(len(results_logprobs_none)):
+        # Check sample logprobs are None
         assert results_logprobs_none[i].outputs[0].logprobs is None
         assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
+        # Check prompt logprobs are None
+        assert results_logprobs_none[i].prompt_logprobs is None

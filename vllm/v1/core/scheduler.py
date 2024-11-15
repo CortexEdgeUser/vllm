@@ -416,13 +416,17 @@ class Scheduler:
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             req_index = model_runner_output.req_id_to_index[req_id]
             num_new_tokens = 1
-            num_new_prompt_tokens = num_new_prompt_tokens_list[req_index]
-
             max_logprobs = request.max_logprobs
-            max_prompt_logprobs = request.max_prompt_logprobs
-            do_prompt_logprobs = (max_prompt_logprobs > 0
-                                  and num_new_prompt_tokens > 0)
+            request_do_logprobs = do_logprobs and max_logprobs > 0
+
             if do_prompt_logprobs:
+                max_prompt_logprobs = request.max_prompt_logprobs
+
+                num_new_prompt_tokens = num_new_prompt_tokens_list[req_index]
+
+                request_do_prompt_logprobs = (max_prompt_logprobs > 0
+                                              and num_new_prompt_tokens > 0)
+
                 # Construct prompt logprobs, under the condition that
                 # prompt logprobs were requested & a nonzero number of
                 # prompt tokens were computed in this step for this request.
@@ -455,6 +459,8 @@ class Scheduler:
                 prompt_slice_range_upper = request.num_computed_tokens
                 prompt_slice_range_lower = (prompt_slice_range_upper -
                                             num_new_prompt_tokens)
+            else:
+                request_do_prompt_logprobs = False
 
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
@@ -475,7 +481,7 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
-                if max_logprobs > 0:
+                if request_do_logprobs:
                     # Construct logprobs, if requested (TODO: assumes one
                     # generated token). Note that Sampler returns
                     #
@@ -527,22 +533,20 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason,
                     logprobs=request.logprobs[-num_new_tokens:]
-                    if max_logprobs > 0 else None,
+                    if request_do_logprobs else None,
                     prompt_logprobs=(
-                        prompt_logprobs if do_prompt_logprobs else
-                        ([] if max_prompt_logprobs > 0 else None)),
-                    # prompt_logprobs_token_ids=(request.prompt_token_ids[
-                    #         prompt_slice_range_lower:prompt_slice_range_upper]
+                        prompt_logprobs if request_do_prompt_logprobs else
+                        ([] if request_do_prompt_logprobs else None)),
                     prompt_logprobs_token_ids=(
-                        request.prompt_token_ids if do_prompt_logprobs else
-                        ([] if max_prompt_logprobs > 0 else None)))
+                        request.prompt_token_ids if request_do_prompt_logprobs
+                        else ([] if request_do_prompt_logprobs else None)))
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
                     continue
 
-            elif do_prompt_logprobs:
+            elif request_do_prompt_logprobs:
                 # This request is still partial but prompt logprobs were
                 # requested
                 engine_core_outputs.append(
@@ -552,15 +556,15 @@ class Scheduler:
                         finished=request.is_finished(),
                         finish_reason=request.get_finished_reason(),
                         stop_reason=request.stop_reason,
-                        logprobs=[] if max_logprobs > 0 else None,
+                        logprobs=[] if request_do_logprobs else None,
                         prompt_logprobs=(
-                            prompt_logprobs if do_prompt_logprobs else
-                            ([] if max_prompt_logprobs > 0 else None)),
-                        prompt_logprobs_token_ids=(request.prompt_token_ids[
-                            prompt_slice_range_lower:prompt_slice_range_upper]
-                                                   if do_prompt_logprobs else
-                                                   ([] if max_prompt_logprobs >
-                                                    0 else None))))
+                            prompt_logprobs if request_do_prompt_logprobs else
+                            ([] if request_do_prompt_logprobs else None)),
+                        prompt_logprobs_token_ids=(
+                            request.prompt_token_ids[prompt_slice_range_lower:
+                                                     prompt_slice_range_upper]
+                            if request_do_prompt_logprobs else
+                            ([] if request_do_prompt_logprobs else None))))
 
             new_running.append(request)
         self.running = new_running
