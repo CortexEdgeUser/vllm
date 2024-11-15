@@ -21,7 +21,6 @@ MODELS = ["facebook/opt-125m"]
                                                                       (6, 0),
                                                                       (0, 6)])
 @pytest.mark.parametrize("detokenize", [True, False])
-@pytest.mark.parametrize("vllm_use_v1", [True, False])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
@@ -31,17 +30,17 @@ def test_get_logprobs_and_prompt_logprobs(
     num_top_logprobs: int,
     num_top_prompt_logprobs: int,
     detokenize: bool,
-    vllm_use_v1: bool,
     example_prompts,
     monkeypatch,
 ):
-    if vllm_use_v1:
-        # LLM engine v1
-        monkeypatch.setenv("VLLM_USE_V1", "1")
-        override_backend_env_variable(monkeypatch, "FLASH_ATTN")
-    else:
-        # LLM engine v0
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+
+    do_logprobs = (num_top_logprobs is not None and num_top_logprobs > 0)
+    do_prompt_logprobs = (num_top_prompt_logprobs is not None
+                          and num_top_prompt_logprobs > 0)
+
+    # LLM engine v1
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256
     enable_chunked_prefill = False
@@ -87,36 +86,40 @@ def test_get_logprobs_and_prompt_logprobs(
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
-        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+        if do_logprobs:
+            assert result.outputs[0].logprobs is not None
+            assert len(result.outputs[0].logprobs) == max_tokens
+            for logprobs in result.outputs[0].logprobs:
+                # If the output token is not included in the top X
+                # logprob, it can return 1 more data
+                assert (len(logprobs) == num_top_logprobs
+                        or len(logprobs) == num_top_logprobs + 1)
+            output_text = result.outputs[0].text
+            output_string_from_most_likely_tokens_lst: List[str] = []
+            for top_logprobs in result.outputs[0].logprobs:
+                top_logprob = next(iter(top_logprobs.values()))
+                output_string_from_most_likely_tokens_lst.append(
+                    top_logprob.decoded_token)
+
+            if detokenize:
+                output_string_from_most_likely_tokens = "".join(
+                    output_string_from_most_likely_tokens_lst)
+                assert output_text == output_string_from_most_likely_tokens, (
+                    "The output text from the top logprob for each token "
+                    "position should be the same as the output text in the "
+                    "result.")
+            else:
+                assert output_text == ''
+                assert output_string_from_most_likely_tokens_lst == (
+                    [None] * max_tokens)
+
+        if do_prompt_logprobs:
             assert result.prompt_logprobs is not None
-        assert result.outputs[0].logprobs is not None
-        assert len(result.outputs[0].logprobs) == max_tokens
-        for logprobs in result.outputs[0].logprobs:
-            # If the output token is not included in the top X
-            # logprob, it can return 1 more data
-            assert (len(logprobs) == num_top_logprobs
-                    or len(logprobs) == num_top_logprobs + 1)
-        output_text = result.outputs[0].text
-        output_string_from_most_likely_tokens_lst: List[str] = []
-        for top_logprobs in result.outputs[0].logprobs:
-            top_logprob = next(iter(top_logprobs.values()))
-            output_string_from_most_likely_tokens_lst.append(
-                top_logprob.decoded_token)
-
-        if detokenize:
-            output_string_from_most_likely_tokens = "".join(
-                output_string_from_most_likely_tokens_lst)
-            assert output_text == output_string_from_most_likely_tokens, (
-                "The output text from the top logprob for each token position "
-                "should be the same as the output text in the result.")
-        else:
-            assert output_text == ''
-            assert output_string_from_most_likely_tokens_lst == ([None] *
-                                                                 max_tokens)
-
-        # The first prompt logprob is always None
-        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+            # The first prompt logprob is always None
             assert result.prompt_logprobs[0] is None
+            # Prompt logprobs are returned for all indices in
+            # the prompt
+            assert len(result.prompt_logprobs) == len(result.prompt_token_ids)
             for prompt_logprobs in result.prompt_logprobs[1:]:
                 # If the prompt token is not included in the top X
                 # logprob, it can return 1 more data
@@ -125,7 +128,7 @@ def test_get_logprobs_and_prompt_logprobs(
 
     # Test whether prompt logprobs are consistent with HF
     for vllm_result, hf_logprob in zip(vllm_results, hf_logprobs):
-        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+        if do_prompt_logprobs:
             # Check prompt logprobs
             # The first prompt logprob is always None, so we compare it from 1:.
             vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
@@ -136,19 +139,21 @@ def test_get_logprobs_and_prompt_logprobs(
                         hf_logprob[0][i][token_id].item(),
                         atol=1e-2,
                         rtol=1e-2)
-        # Check sample logprobs
-        vllm_sample_logprobs = vllm_result.outputs[0].logprobs
-        for i, top_logprobs in enumerate(vllm_sample_logprobs):
-            for token_id, sample_logprob in top_logprobs.items():
-                logprob = sample_logprob.logprob
-                torch.testing.assert_close(logprob,
-                                           hf_logprob[i][-1][token_id].item(),
-                                           atol=1e-2,
-                                           rtol=1e-2)
-                if detokenize:
-                    assert isinstance(sample_logprob.decoded_token, str), (
-                        "The token should be decoded by the time it is returned"
-                        " to the user.")
+        if do_logprobs:
+            # Check sample logprobs
+            vllm_sample_logprobs = vllm_result.outputs[0].logprobs
+            for i, top_logprobs in enumerate(vllm_sample_logprobs):
+                for token_id, sample_logprob in top_logprobs.items():
+                    logprob = sample_logprob.logprob
+                    torch.testing.assert_close(
+                        logprob,
+                        hf_logprob[i][-1][token_id].item(),
+                        atol=1e-2,
+                        rtol=1e-2)
+                    if detokenize:
+                        assert isinstance(sample_logprob.decoded_token, str), (
+                            "The token should be decoded by the time it is"
+                            " returned to the user.")
 
 
 def test_max_logprobs(monkeypatch):

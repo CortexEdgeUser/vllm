@@ -386,9 +386,9 @@ class Scheduler:
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         do_logprobs = model_runner_output.logprobs_cpu is not None
-        do_prompt_logprobs = (model_runner_output.prompt_logprobs_cpu
-                              is not None
-                              and len(model_runner_output.logprobs_cpu) > 0)
+        do_prompt_logprobs = (
+            model_runner_output.prompt_logprobs_cpu is not None
+            and len(model_runner_output.prompt_logprobs_cpu) > 0)
         if do_logprobs:
             assert model_runner_output.logprob_token_ids_cpu is not None
             logprob_token_ids_list = (
