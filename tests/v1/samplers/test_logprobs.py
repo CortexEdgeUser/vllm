@@ -16,10 +16,9 @@ MODELS = ["facebook/opt-125m"]
                          ["half"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs,num_top_prompt_logprobs", [(0, 0),
-                                                                      (1, 6),
-                                                                      (6, 1),
                                                                       (6, 0),
-                                                                      (0, 6)])
+                                                                      (0, 6),
+                                                                      (5, 3)])
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
