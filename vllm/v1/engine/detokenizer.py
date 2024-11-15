@@ -107,47 +107,51 @@ class IncrementalDetokenizer:
     def detokenize_logprob_in_place(
         self,
         logprob_dict: Dict[int, Logprob],
+        input_ids_prefix: List[int],
+        prev_tokens: Optional[List[str]],
+        prefix_offset: int,
+        read_offset: int,
+        skip_special_tokens: bool = False,
+        spaces_between_special_tokens: bool = True,
     ) -> None:
-        """Cmopute `decoded_token` by detokenizing a logprob's token id"""
+        """Compute logprob `decoded_token` by detokenizing logprob token id"""
 
         for token_id in logprob_dict:
             # Detokenize logprob for a particular top
             # token at a particular token offset
-            # logprob_dict[token_id].decoded_token = (
-            #     self.tokenizer.convert_ids_to_tokens(
-            #         [token_id], skip_special_tokens=skip_special_tokens))[0]
+
             logprob_dict[token_id].decoded_token = detokenize_incrementally(
                 tokenizer=self.tokenizer,
-                all_input_ids=[token_id],
-                prev_tokens=None,
-                prefix_offset=self.prefix_offset,
-                read_offset=self.read_offset,
-                skip_special_tokens=self.skip_special_tokens,
-                spaces_between_special_tokens=self.
-                spaces_between_special_tokens,
-            )[1]  # New decoded token text
+                all_input_ids=input_ids_prefix + [token_id],
+                prev_tokens=prev_tokens,
+                prefix_offset=prefix_offset,
+                read_offset=read_offset,
+                skip_special_tokens=skip_special_tokens,
+                spaces_between_special_tokens=spaces_between_special_tokens,
+            )[1]
 
-    def modify_logprobs_in_place(
-        self,
-        skip_special_tokens: bool,
-        logprobs: AnyLogprobs,
-    ) -> None:
-        """Compute (in-place) the `decoded_token` field of a request's logprobs
+    # def modify_logprobs_in_place(
+    #     self,
+    #     skip_special_tokens: bool,
+    #     logprobs: AnyLogprobs,
+    # ) -> None:
+    #     """Compute (in-place) the `decoded_token` field of a request's
+    # logprobs
 
-        Behavior: for each token offset, for each top token,
-        compute `decoded_token` for that token.
+    #     Behavior: for each token offset, for each top token,
+    #     compute `decoded_token` for that token.
 
-        Args:
-        request_id
-        logprobs_list: request logprobs
-        """
+    #     Args:
+    #     request_id
+    #     logprobs_list: request logprobs
+    #     """
 
-        if logprobs is not None:
-            # Request has logprobs
-            for logprob_dict in logprobs:
-                if logprob_dict is not None:
-                    # Logprobs at a token offset
-                    self.detokenize_logprob_in_place(logprob_dict, )
+    #     if logprobs is not None:
+    #         # Request has logprobs
+    #         for logprob_dict in logprobs:
+    #             if logprob_dict is not None:
+    #                 # Logprobs at a token offset
+    #                 self.detokenize_logprob_in_place(logprob_dict, )
 
     def add_tokens_maybe_logprobs(
         self,
@@ -165,11 +169,15 @@ class IncrementalDetokenizer:
             2) Update the RequestOutput with the new text.
         """
 
-        # 1) Detokenize the new token ids incrementally.
+        do_logprobs = new_logprobs is not None and len(new_logprobs) > 0
+        assert not do_logprobs or len(new_logprobs) == len(new_token_ids)
+
+        # 1) Detokenize the new token ids incrementally. If necessary,
+        #    detokenize logprobs.
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         decoded_text = ""
-        for new_token_id in new_token_ids:
+        for tdx, new_token_id in enumerate(new_token_ids):
             self.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
              read_offset) = detokenize_incrementally(
@@ -183,6 +191,22 @@ class IncrementalDetokenizer:
                  spaces_between_special_tokens,
              )
 
+            if do_logprobs:
+                # Detokenize individual token logprobs in-place
+                logprob_dict = new_logprobs[tdx]
+                assert logprob_dict is not None
+                self.detokenize_logprob_in_place(
+                    logprob_dict=logprob_dict,
+                    input_ids_prefix=self.token_ids[0:-1],
+                    prev_tokens=self.tokens,
+                    prefix_offset=self.prefix_offset,
+                    read_offset=self.read_offset,
+                    skip_special_tokens=self.skip_special_tokens,
+                    spaces_between_special_tokens=self.
+                    spaces_between_special_tokens,
+                )
+                self.logprobs.append(logprob_dict)
+
             self.tokens.extend(new_tokens)
             self.prefix_offset = prefix_offset
             self.read_offset = read_offset
@@ -190,16 +214,10 @@ class IncrementalDetokenizer:
 
             decoded_text += new_decoded_token_text
 
-        # 1a) If necessary, detokenize logprobs incrementally
-        if new_logprobs is not None and len(new_logprobs) > 0:
-            self.modify_logprobs_in_place(self.skip_special_tokens,
-                                          new_logprobs)
-            self.logprobs.extend(new_logprobs)
-
         # 1b) If necessary, detokenize prompt logprobs incrementally
         if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
-            self.modify_logprobs_in_place(self.skip_special_tokens,
-                                          new_prompt_logprobs)
+            # self.modify_logprobs_in_place(self.skip_special_tokens,
+            #                               new_prompt_logprobs)
             self.prompt_logprobs.extend(new_prompt_logprobs)
 
         # 2) Evaluate stop criteria.
