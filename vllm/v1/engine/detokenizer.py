@@ -5,9 +5,10 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally,
+    detokenize_logprob_incrementally_in_place)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
 
@@ -104,32 +105,6 @@ class IncrementalDetokenizer:
             logprobs=[] if do_logprobs else None,
             prompt_logprobs=[] if do_prompt_logprobs else None)
 
-    def detokenize_logprob_in_place(
-        self,
-        logprob_dict: Dict[int, Logprob],
-        input_ids_prefix: List[int],
-        prev_tokens: Optional[List[str]],
-        prefix_offset: int,
-        read_offset: int,
-        skip_special_tokens: bool = False,
-        spaces_between_special_tokens: bool = True,
-    ) -> None:
-        """Compute logprob `decoded_token` by detokenizing logprob token id"""
-
-        for token_id in logprob_dict:
-            # Detokenize logprob for a particular top
-            # token at a particular token offset
-
-            logprob_dict[token_id].decoded_token = detokenize_incrementally(
-                tokenizer=self.tokenizer,
-                all_input_ids=input_ids_prefix + [token_id],
-                prev_tokens=prev_tokens,
-                prefix_offset=prefix_offset,
-                read_offset=read_offset,
-                skip_special_tokens=skip_special_tokens,
-                spaces_between_special_tokens=spaces_between_special_tokens,
-            )[1]
-
     # def modify_logprobs_in_place(
     #     self,
     #     skip_special_tokens: bool,
@@ -195,7 +170,8 @@ class IncrementalDetokenizer:
                 # Detokenize individual token logprobs in-place
                 logprob_dict = new_logprobs[tdx]
                 assert logprob_dict is not None
-                self.detokenize_logprob_in_place(
+                detokenize_logprob_incrementally_in_place(
+                    tokenizer=self.tokenizer,
                     logprob_dict=logprob_dict,
                     input_ids_prefix=self.token_ids[0:-1],
                     prev_tokens=self.tokens,
