@@ -86,7 +86,8 @@ class Processor:
             sampling_params.skip_special_tokens,
             sampling_params.spaces_between_special_tokens,
             sampling_params.output_kind, sampling_params.stop,
-            sampling_params.include_stop_str_in_output)
+            sampling_params.include_stop_str_in_output,
+            sampling_params.logprobs, sampling_params.prompt_logprobs)
 
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(

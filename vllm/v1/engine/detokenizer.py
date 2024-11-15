@@ -5,15 +5,16 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
 logger = init_logger(__name__)
 
 AnyLogprobs = Union[Optional[SampleLogprobs], Optional[PromptLogprobs]]
+
 
 @dataclass
 class IncrementalDetokenizer:
@@ -22,6 +23,8 @@ class IncrementalDetokenizer:
     output_text: str
     tokens: List[str]
     token_ids: List[int]
+    logprobs: Optional[SampleLogprobs]
+    prompt_logprobs: Optional[PromptLogprobs]
 
     # Stop strings
     stop: List[str]
@@ -74,6 +77,11 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
+        # Logprobs & prompt logprobs settings
+        do_logprobs = request.logprobs is not None and request.logprobs > 0
+        do_prompt_logprobs = (request.prompt_logprobs is not None
+                              and request.prompt_logprobs > 0)
+
         return cls(
             output_text="",
             tokens=tokens,
@@ -93,11 +101,11 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
-        )
+            logprobs=[] if do_logprobs else None,
+            prompt_logprobs=[] if do_prompt_logprobs else None)
 
     def detokenize_logprob_in_place(
         self,
-        skip_special_tokens: bool,
         logprob_dict: Dict[int, Logprob],
     ) -> None:
         """Cmopute `decoded_token` by detokenizing a logprob's token id"""
@@ -105,13 +113,23 @@ class IncrementalDetokenizer:
         for token_id in logprob_dict:
             # Detokenize logprob for a particular top
             # token at a particular token offset
-            logprob_dict[token_id].decoded_token = (
-                self.tokenizer.convert_ids_to_tokens(
-                    [token_id], skip_special_tokens=skip_special_tokens))[0]
+            # logprob_dict[token_id].decoded_token = (
+            #     self.tokenizer.convert_ids_to_tokens(
+            #         [token_id], skip_special_tokens=skip_special_tokens))[0]
+            logprob_dict[token_id].decoded_token = detokenize_incrementally(
+                tokenizer=self.tokenizer,
+                all_input_ids=[token_id],
+                prev_tokens=None,
+                prefix_offset=self.prefix_offset,
+                read_offset=self.read_offset,
+                skip_special_tokens=self.skip_special_tokens,
+                spaces_between_special_tokens=self.
+                spaces_between_special_tokens,
+            )[1]  # New decoded token text
 
     def modify_logprobs_in_place(
         self,
-        request_id: str,
+        skip_special_tokens: bool,
         logprobs: AnyLogprobs,
     ) -> None:
         """Compute (in-place) the `decoded_token` field of a request's logprobs
@@ -126,23 +144,16 @@ class IncrementalDetokenizer:
 
         if logprobs is not None:
             # Request has logprobs
-            req_state = self.request_states[request_id]
-            skip_special_tokens = req_state.skip_special_tokens
             for logprob_dict in logprobs:
                 if logprob_dict is not None:
                     # Logprobs at a token offset
-                    self.detokenize_logprob_in_place(
-                        skip_special_tokens,
-                        logprob_dict,
-                    )
-
+                    self.detokenize_logprob_in_place(logprob_dict, )
 
     def add_tokens_maybe_logprobs(
         self,
         new_token_ids: List[int],
         new_logprobs: Optional[SampleLogprobs],
         new_prompt_logprobs: Optional[PromptLogprobs],
-        new_prompt_logprobs_token_ids: Optional[List[int]],
         finish_reason: Optional[str],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
@@ -180,11 +191,16 @@ class IncrementalDetokenizer:
             decoded_text += new_decoded_token_text
 
         # 1a) If necessary, detokenize logprobs incrementally
-        if new_logprobs is not None:
-            pass
+        if new_logprobs is not None and len(new_logprobs) > 0:
+            self.modify_logprobs_in_place(self.skip_special_tokens,
+                                          new_logprobs)
+            self.logprobs.extend(new_logprobs)
 
         # 1b) If necessary, detokenize prompt logprobs incrementally
-        if new_prompt_logprobs is not None:
+        if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
+            self.modify_logprobs_in_place(self.skip_special_tokens,
+                                          new_prompt_logprobs)
+            self.prompt_logprobs.extend(new_prompt_logprobs)
 
         # 2) Evaluate stop criteria.
         if self.stop:
@@ -212,6 +228,8 @@ class IncrementalDetokenizer:
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.output_token_ids
+        logprobs = new_logprobs if delta else self.logprobs
+        prompt_logprobs = new_prompt_logprobs if delta else self.prompt_logprobs
 
         request_output = RequestOutput.new(
             self.request_id,
@@ -219,6 +237,8 @@ class IncrementalDetokenizer:
             self.prompt_token_ids,
             output_text,
             token_ids,
+            logprobs,
+            prompt_logprobs,
             finished,
         )
 
@@ -305,7 +325,6 @@ class Detokenizer:
                 new_token_ids=engine_core_output.new_token_ids,
                 new_logprobs=engine_core_output.logprobs,
                 new_prompt_logprobs=engine_core_output.prompt_logprobs,
-                new_prompt_logprobs_token_ids=engine_core_output.prompt_logprobs_token_ids,
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )

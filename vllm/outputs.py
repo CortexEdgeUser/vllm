@@ -34,7 +34,6 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -122,25 +121,24 @@ class RequestOutput:
         prompt_token_ids: Optional[List[int]],
         text: str,
         token_ids: List[int],
+        logprobs: Optional[SampleLogprobs],
+        prompt_logprobs: Optional[PromptLogprobs],
         finished: bool = False,
     ) -> "RequestOutput":
         """Initialize a new RequestOutput object."""
 
         # TODO: Support `n` > 1.
-        completion_output = CompletionOutput(
-            index=0,
-            text=text,
-            token_ids=token_ids,
-            cumulative_logprob=None,
-            logprobs=None,
-            prompt_logprobs=None,
-        )
+        completion_output = CompletionOutput(index=0,
+                                             text=text,
+                                             token_ids=token_ids,
+                                             cumulative_logprob=None,
+                                             logprobs=logprobs)
 
         return RequestOutput(
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,  # TODO
+            prompt_logprobs=prompt_logprobs,
             outputs=[completion_output],
             finished=finished,
         )

@@ -22,6 +22,11 @@ class DetokenizerRequest:
     stop: List[str]
     include_stop_str_in_output: bool
 
+    # Per-request logprobs & prompt logprobs
+    # counts; None is equivalent to 0
+    logprobs: Optional[int]
+    prompt_logprobs: Optional[int]
+
 
 class EngineCoreRequest(msgspec.Struct, omit_defaults=True):
 
