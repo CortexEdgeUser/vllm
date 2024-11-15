@@ -15,10 +15,6 @@ MODELS = ["facebook/opt-125m"]
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
-@pytest.mark.parametrize("num_top_logprobs,num_top_prompt_logprobs", [(0, 0),
-                                                                      (6, 0),
-                                                                      (0, 6),
-                                                                      (5, 3)])
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
@@ -26,16 +22,14 @@ def test_get_logprobs_and_prompt_logprobs(
     model,
     dtype,
     chunked_prefill_token_size: int,
-    num_top_logprobs: int,
-    num_top_prompt_logprobs: int,
     detokenize: bool,
     example_prompts,
     monkeypatch,
 ):
 
-    do_logprobs = (num_top_logprobs is not None and num_top_logprobs > 0)
-    do_prompt_logprobs = (num_top_prompt_logprobs is not None
-                          and num_top_prompt_logprobs > 0)
+    # do_logprobs = (num_top_logprobs is not None and num_top_logprobs > 0)
+    # do_prompt_logprobs = (num_top_prompt_logprobs is not None
+    #                       and num_top_prompt_logprobs > 0)
 
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
@@ -60,20 +54,48 @@ def test_get_logprobs_and_prompt_logprobs(
             max_tokens=max_tokens,
         )
 
+    # Batch has mixed sample params
+    # (different logprobs/prompt logprobs combos)
+    logprob_prompt_logprob_list=[
+        (None,0),
+        (0,None),
+        (0,0),
+        (6,None),
+        (6,0),
+        (None,6),
+        (0,6),
+        (6,6),
+    ]
+    # We rely on there being more prompts than combinations of
+    # logprobs & prompt logprobs which we want to test
+    assert len(example_prompts) >= len(logprob_prompt_logprob_list)
+    # Make sure there is a sample params for each prompt
+    num_extra_params = len(example_prompts) - len(logprob_prompt_logprob_list)
+    if num_extra_params > 0:
+        logprob_prompt_logprob_list = (
+            logprob_prompt_logprob_list + 
+            logprob_prompt_logprob_list[-num_extra_params:])
+    # Now the number of prompts should match the number of sample params combos
+    assert len(example_prompts) == len(logprob_prompt_logprob_list)
+    # Generate SamplingParams
+    vllm_sampling_params = [
+        SamplingParams(
+            max_tokens=max_tokens,
+            logprobs=lp,
+            prompt_logprobs=plp,
+            temperature=0.0,
+            detokenize=detokenize)
+        for lp,plp in logprob_prompt_logprob_list
+    ]
+
     with vllm_runner(
             model,
             dtype=dtype,
-            max_logprobs=num_top_logprobs,
+            max_logprobs=7,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        vllm_sampling_params = SamplingParams(
-            max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_top_prompt_logprobs,
-            temperature=0.0,
-            detokenize=detokenize)
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 

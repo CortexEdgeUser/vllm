@@ -415,14 +415,17 @@ class Scheduler:
             req_index = model_runner_output.req_id_to_index[req_id]
             num_new_tokens = 1
             max_logprobs = request.max_logprobs
-            request_do_logprobs = do_logprobs and max_logprobs > 0
+            request_do_logprobs = (do_logprobs and 
+                                   max_logprobs is not None and 
+                                   max_logprobs > 0)
 
             if do_prompt_logprobs:
                 max_prompt_logprobs = request.max_prompt_logprobs
 
                 num_new_prompt_tokens = num_new_prompt_tokens_list[req_index]
 
-                request_do_prompt_logprobs = (max_prompt_logprobs > 0
+                request_do_prompt_logprobs = (max_prompt_logprobs is not None
+                                              and max_prompt_logprobs > 0
                                               and num_new_prompt_tokens > 0)
 
                 # Construct prompt logprobs, under the condition that
