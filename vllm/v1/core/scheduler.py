@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-import torch
-
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -499,10 +497,15 @@ class Scheduler:
                         logprob_values[max_logprobs:-1] = (
                             [float('-inf')] *
                             (len(logprob_values) - 1 - max_logprobs))
-                        logprob_values, indices = torch.sort(logprob_values,
-                                                             dim=-1)
-                        logprob_token_ids = torch.gather(
-                            logprob_token_ids, 1, indices)
+
+                        indices = sorted(range(len(logprob_values)),
+                                         key=lambda k: logprob_values[k],
+                                         reverse=True)
+                        logprob_values = [logprob_values[i] for i in indices]
+                        logprob_token_ids = [
+                            logprob_token_ids[i] for i in indices
+                        ]
+
                         # There will be one more logprob than the user requested
                         logprob_cnt = max_logprobs + 1
 
