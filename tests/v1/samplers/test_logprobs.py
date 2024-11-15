@@ -15,16 +15,21 @@ MODELS = ["facebook/opt-125m"]
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
-@pytest.mark.parametrize("num_top_logprobs", [0, 6])  # 32000 == vocab_size
+@pytest.mark.parametrize("num_top_logprobs,num_top_prompt_logprobs", [(0, 0),
+                                                                      (1, 6),
+                                                                      (6, 1),
+                                                                      (6, 0),
+                                                                      (0, 6)])
 @pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("vllm_use_v1", [True, False])
-def test_get_prompt_logprobs(
+def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
     model,
     dtype,
     chunked_prefill_token_size: int,
     num_top_logprobs: int,
+    num_top_prompt_logprobs: int,
     detokenize: bool,
     vllm_use_v1: bool,
     example_prompts,
@@ -48,6 +53,10 @@ def test_get_prompt_logprobs(
 
     max_tokens = 5
     with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(
+            example_prompts,
+            max_tokens=max_tokens,
+        )
         hf_logprobs = hf_model.generate_greedy_logprobs(
             example_prompts,
             max_tokens=max_tokens,
@@ -61,17 +70,25 @@ def test_get_prompt_logprobs(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
-                                              logprobs=num_top_logprobs,
-                                              prompt_logprobs=num_top_logprobs,
-                                              temperature=0.0,
-                                              detokenize=detokenize)
+        vllm_sampling_params = SamplingParams(
+            max_tokens=max_tokens,
+            logprobs=num_top_logprobs,
+            prompt_logprobs=num_top_prompt_logprobs,
+            temperature=0.0,
+            detokenize=detokenize)
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
+    # Test whether final output is consistent between vLLM and HF
+    for vllm_result, hf_output in zip(vllm_results, hf_outputs):
+        # vLLM prompt+completion should match HF output
+        assert (vllm_result.prompt_token_ids +
+                vllm_result.outputs[0].token_ids == hf_output[0])
+
     # Test whether logprobs are included in the results.
     for result in vllm_results:
-        assert result.prompt_logprobs is not None
+        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+            assert result.prompt_logprobs is not None
         assert result.outputs[0].logprobs is not None
         assert len(result.outputs[0].logprobs) == max_tokens
         for logprobs in result.outputs[0].logprobs:
@@ -98,24 +115,28 @@ def test_get_prompt_logprobs(
                                                                  max_tokens)
 
         # The first prompt logprob is always None
-        assert result.prompt_logprobs[0] is None
-        for prompt_logprobs in result.prompt_logprobs[1:]:
-            # If the prompt token is not included in the top X
-            # logprob, it can return 1 more data
-            assert (len(prompt_logprobs) == num_top_logprobs
-                    or len(prompt_logprobs) == num_top_logprobs + 1)
+        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+            assert result.prompt_logprobs[0] is None
+            for prompt_logprobs in result.prompt_logprobs[1:]:
+                # If the prompt token is not included in the top X
+                # logprob, it can return 1 more data
+                assert (len(prompt_logprobs) == num_top_prompt_logprobs
+                        or len(prompt_logprobs) == num_top_prompt_logprobs + 1)
 
     # Test whether prompt logprobs are consistent with HF
     for vllm_result, hf_logprob in zip(vllm_results, hf_logprobs):
-        # Check prompt logprobs
-        # The first prompt logprob is always None, so we compare it from 1:.
-        vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
-        for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
-            for token_id, logprob in vllm_prompt_logprob_dict.items():
-                torch.testing.assert_close(logprob.logprob,
-                                           hf_logprob[0][i][token_id].item(),
-                                           atol=1e-2,
-                                           rtol=1e-2)
+        if num_top_prompt_logprobs is not None and num_top_prompt_logprobs > 0:
+            # Check prompt logprobs
+            # The first prompt logprob is always None, so we compare it from 1:.
+            vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
+            for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
+                for token_id, logprob in vllm_prompt_logprob_dict.items():
+                    torch.testing.assert_close(
+                        logprob.logprob,
+                        hf_logprob[0][i][token_id].item(),
+                        atol=1e-2,
+                        rtol=1e-2)
+        # Check sample logprobs
         vllm_sample_logprobs = vllm_result.outputs[0].logprobs
         for i, top_logprobs in enumerate(vllm_sample_logprobs):
             for token_id, sample_logprob in top_logprobs.items():
@@ -128,17 +149,6 @@ def test_get_prompt_logprobs(
                     assert isinstance(sample_logprob.decoded_token, str), (
                         "The token should be decoded by the time it is returned"
                         " to the user.")
-
-    # Test if prompt logprobs are correctly set.
-    for vllm_result in vllm_results:
-        token_ids = vllm_result.prompt_token_ids
-        prompt_logprobs = vllm_result.prompt_logprobs
-
-        # The first token doesn't have logprob.
-        assert prompt_logprobs[0] is None
-
-        for token_id, logprob_dict in zip(token_ids[1:], prompt_logprobs[1:]):
-            assert token_id in logprob_dict
 
 
 def test_max_logprobs(monkeypatch):
