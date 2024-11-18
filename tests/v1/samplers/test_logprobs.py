@@ -26,10 +26,27 @@ def test_get_logprobs_and_prompt_logprobs(
     example_prompts,
     monkeypatch,
 ):
+    """Test V1 Engine logprobs & prompt logprobs
+    
+    Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
+    settings and validate that
+    * The generated logprobs and prompt logprobs are consistent with the
+      configuration settings, in terms of whether or not the logprobs
+      (of either type) were requested and how many were requested
+    * The generated logprobs are consistent with the generated tokens
+    * The generated (prompt)logprobs are consistent with HuggingFace
+      (prompt)logprobs, as a reference
 
-    # do_logprobs = (num_top_logprobs is not None and num_top_logprobs > 0)
-    # do_prompt_logprobs = (num_top_prompt_logprobs is not None
-    #                       and num_top_prompt_logprobs > 0)
+    Args:
+      hf_runner
+      vllm_runner
+      model
+      dtype
+      chunked_prefill_token_size: chunked prefill token limit
+      detokenize: if False, return generated tokens bypassing detokenizer
+      example_prompts
+      monkeypatch
+    """
 
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
@@ -98,10 +115,9 @@ def test_get_logprobs_and_prompt_logprobs(
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
-    for rdx, (vllm_result, hf_logprob, hf_output,
-              logprob_prompt_logprob) in enumerate(
-                  zip(vllm_results, hf_logprobs, hf_outputs,
-                      logprob_prompt_logprob_list)):
+    for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
+            vllm_results, hf_logprobs, hf_outputs,
+            logprob_prompt_logprob_list):
 
         # Extract request-level (prompt)logprobs config
         num_top_logprobs = logprob_prompt_logprob[0]
@@ -196,6 +212,13 @@ def test_get_logprobs_and_prompt_logprobs(
 
 
 def test_max_logprobs(monkeypatch):
+    """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
+    
+    Should also fail for `prompt_logprobs > max_logprobs`
+    
+    Args:
+      monkeypatch
+    """
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
@@ -215,6 +238,7 @@ def test_max_logprobs(monkeypatch):
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
                        detokenize: bool, example_prompts, monkeypatch):
+    """Engine should return `logprobs` and `prompt_logprobs` as `None`"""
 
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
