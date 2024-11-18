@@ -14,14 +14,12 @@ MODELS = ["facebook/opt-125m"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
     model,
     dtype,
-    chunked_prefill_token_size: int,
     detokenize: bool,
     example_prompts,
     monkeypatch,
@@ -42,7 +40,6 @@ def test_get_logprobs_and_prompt_logprobs(
       vllm_runner
       model
       dtype
-      chunked_prefill_token_size: chunked prefill token limit
       detokenize: if False, return generated tokens bypassing detokenizer
       example_prompts
       monkeypatch
@@ -53,12 +50,7 @@ def test_get_logprobs_and_prompt_logprobs(
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256
-    enable_chunked_prefill = False
     max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
-        max_num_batched_tokens = chunked_prefill_token_size
 
     max_tokens = 5
     with hf_runner(model, dtype=dtype) as hf_model:
@@ -108,7 +100,6 @@ def test_get_logprobs_and_prompt_logprobs(
             model,
             dtype=dtype,
             max_logprobs=7,
-            enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
@@ -234,28 +225,29 @@ def test_max_logprobs(monkeypatch):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("detokenize", [True, False])
-def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
-                       detokenize: bool, example_prompts, monkeypatch):
-    """Engine should return `logprobs` and `prompt_logprobs` as `None`"""
+def test_none_logprobs(vllm_runner, model, detokenize: bool, example_prompts,
+                       monkeypatch):
+    """Engine should return `logprobs` and `prompt_logprobs` as `None`
+    
+    Args:
+      vllm_runner
+      model
+      detokenize: whether to feed generated tokens to detokenizer
+      example_prompts
+      monkeypatch
+    """
 
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256
-    enable_chunked_prefill = False
     max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
-        max_num_batched_tokens = chunked_prefill_token_size
     max_tokens = 5
 
     with vllm_runner(
             model,
-            enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
