@@ -105,29 +105,6 @@ class IncrementalDetokenizer:
             logprobs=[] if do_logprobs else None,
             prompt_logprobs=[] if do_prompt_logprobs else None)
 
-    # def modify_logprobs_in_place(
-    #     self,
-    #     skip_special_tokens: bool,
-    #     logprobs: AnyLogprobs,
-    # ) -> None:
-    #     """Compute (in-place) the `decoded_token` field of a request's
-    # logprobs
-
-    #     Behavior: for each token offset, for each top token,
-    #     compute `decoded_token` for that token.
-
-    #     Args:
-    #     request_id
-    #     logprobs_list: request logprobs
-    #     """
-
-    #     if logprobs is not None:
-    #         # Request has logprobs
-    #         for logprob_dict in logprobs:
-    #             if logprob_dict is not None:
-    #                 # Logprobs at a token offset
-    #                 self.detokenize_logprob_in_place(logprob_dict, )
-
     def add_tokens_maybe_logprobs(
         self,
         new_token_ids: List[int],
@@ -192,8 +169,6 @@ class IncrementalDetokenizer:
 
         # 1b) If necessary, detokenize prompt logprobs incrementally
         if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
-            # self.modify_logprobs_in_place(self.skip_special_tokens,
-            #                               new_prompt_logprobs)
             self.prompt_logprobs.extend(new_prompt_logprobs)
 
         # 2) Evaluate stop criteria.
