@@ -458,15 +458,6 @@ class Scheduler:
                         # Ensure that None is the first prompt logprob
                         prompt_logprobs = [None] + prompt_logprobs
 
-                    # prompt_len = len(request.prompt_token_ids)
-                    # post_step_prompt_logprob_cnt = (
-                    #     len(request.prompt_logprobs) + len(prompt_logprobs))
-                    # assert post_step_prompt_logprob_cnt <= prompt_len + 1
-                    # assert post_step_prompt_logprob_cnt != prompt_len
-                    # if post_step_prompt_logprob_cnt == prompt_len + 1:
-                    #     # Exclude very last logprob
-                    #     prompt_logprobs = prompt_logprobs[0:-1]
-
                     curr_prompt_base_idx = slice_upper_index
 
                     prompt_slice_range_upper = request.num_computed_tokens
@@ -499,12 +490,7 @@ class Scheduler:
                 token_id = sampled_token_ids[req_index]
                 if request_do_logprobs:
                     # Construct logprobs, if requested (TODO: assumes one
-                    # generated token). Note that Sampler returns
-                    #
-                    # logprob_token_ids =
-                    #   <(batch max logprobs) tok ids><sampled tok id>
-                    # logprob_values =
-                    #   <(batch max logprobs) tok logprobs><sampled tok logprob>
+                    # generated token).
                     logprob_token_ids = logprob_token_ids_list[req_index]
                     logprob_values = logprob_values_list[req_index]
                     logprob_cnt = max_logprobs
