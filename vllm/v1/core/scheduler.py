@@ -428,47 +428,49 @@ class Scheduler:
                                               and max_prompt_logprobs > 0
                                               and num_new_prompt_tokens > 0)
 
-                # Construct prompt logprobs, under the condition that
-                # prompt logprobs were requested & a nonzero number of
-                # prompt tokens were computed in this step for this request.
-                #
-                # Note that this scenario returns an EngineCoreOutput which is
-                # empty except for the prompt logprobs which were computed
-                # for these prompt tokens.
+                if request_do_prompt_logprobs:
 
-                slice_upper_index = (curr_prompt_base_idx +
-                                     num_new_prompt_tokens + 1)
-                prompt_logprob_token_ids = prompt_logprob_token_ids_list[
-                    curr_prompt_base_idx:slice_upper_index]
-                prompt_logprob_values = prompt_logprob_values_list[
-                    curr_prompt_base_idx:slice_upper_index]
-                curr_prompt_base_idx = slice_upper_index
+                    # Construct prompt logprobs, under the condition that
+                    # prompt logprobs were requested & a nonzero number of
+                    # prompt tokens were computed in this step for this request.
+                    #
+                    # Note that this scenario returns an EngineCoreOutput which is
+                    # empty except for the prompt logprobs which were computed
+                    # for these prompt tokens.
 
-                prompt_logprobs = [{
-                    lpt: Logprob(lpv, (idx + 1), None)
-                    for idx, (lpv, lpt) in enumerate(
-                        zip(plp_tok_values, plp_tok_token_ids))
-                } for plp_tok_values, plp_tok_token_ids in zip(
-                    prompt_logprob_values, prompt_logprob_token_ids)]
+                    slice_upper_index = (curr_prompt_base_idx +
+                                        num_new_prompt_tokens + 1)
+                    prompt_logprob_token_ids = prompt_logprob_token_ids_list[
+                        curr_prompt_base_idx:slice_upper_index]
+                    prompt_logprob_values = prompt_logprob_values_list[
+                        curr_prompt_base_idx:slice_upper_index]
+                    curr_prompt_base_idx = slice_upper_index
 
-                if len(request.prompt_logprobs) == 0:
-                    # Ensure that None is the first prompt logprob
-                    prompt_logprobs = [None] + prompt_logprobs
+                    prompt_logprobs = [{
+                        lpt: Logprob(lpv, (idx + 1), None)
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(plp_tok_values, plp_tok_token_ids))
+                    } for plp_tok_values, plp_tok_token_ids in zip(
+                        prompt_logprob_values, prompt_logprob_token_ids)]
 
-                prompt_len = len(request.prompt_token_ids)
-                post_step_prompt_logprob_cnt = (len(request.prompt_logprobs) +
-                                                len(prompt_logprobs))
-                assert post_step_prompt_logprob_cnt <= prompt_len + 1
-                assert post_step_prompt_logprob_cnt != prompt_len
-                if post_step_prompt_logprob_cnt == prompt_len + 1:
-                    # Exclude very last logprob
-                    prompt_logprobs = prompt_logprobs[0:-1]
+                    if len(request.prompt_logprobs) == 0:
+                        # Ensure that None is the first prompt logprob
+                        prompt_logprobs = [None] + prompt_logprobs
 
-                curr_prompt_base_idx = slice_upper_index
+                    prompt_len = len(request.prompt_token_ids)
+                    post_step_prompt_logprob_cnt = (len(request.prompt_logprobs) +
+                                                    len(prompt_logprobs))
+                    assert post_step_prompt_logprob_cnt <= prompt_len + 1
+                    assert post_step_prompt_logprob_cnt != prompt_len
+                    if post_step_prompt_logprob_cnt == prompt_len + 1:
+                        # Exclude very last logprob
+                        prompt_logprobs = prompt_logprobs[0:-1]
 
-                prompt_slice_range_upper = request.num_computed_tokens
-                prompt_slice_range_lower = (prompt_slice_range_upper -
-                                            num_new_prompt_tokens)
+                    curr_prompt_base_idx = slice_upper_index
+
+                    prompt_slice_range_upper = request.num_computed_tokens
+                    prompt_slice_range_lower = (prompt_slice_range_upper -
+                                                num_new_prompt_tokens)
             else:
                 request_do_prompt_logprobs = False
 
