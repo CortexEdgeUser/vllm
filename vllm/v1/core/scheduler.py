@@ -550,13 +550,12 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason,
                     logprobs=(request.logprobs[-num_new_tokens:]
-                    if request_do_logprobs else None),
-                    prompt_logprobs=(
-                        prompt_logprobs if request_do_prompt_logprobs else
-                        None),
-                    prompt_logprobs_token_ids=(
-                        request.prompt_token_ids if request_do_prompt_logprobs
-                        else None))
+                              if request_do_logprobs else None),
+                    prompt_logprobs=(prompt_logprobs
+                                     if request_do_prompt_logprobs else None),
+                    prompt_logprobs_token_ids=(request.prompt_token_ids
+                                               if request_do_prompt_logprobs
+                                               else None))
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
