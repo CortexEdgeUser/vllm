@@ -60,11 +60,11 @@ def test_get_logprobs_and_prompt_logprobs(
         (None, 0),
         (0, None),
         (0, 0),
-        (6, None),
-        (6, 0),
+        (5, None),
+        (3, 0),
         (None, 6),
-        (0, 6),
-        (6, 6),
+        (0, 5),
+        (6, 3),
     ]
     # We rely on there being more prompts than combinations of
     # logprobs & prompt logprobs which we want to test
