@@ -415,9 +415,8 @@ class Scheduler:
             req_index = model_runner_output.req_id_to_index[req_id]
             num_new_tokens = 1
             max_logprobs = request.max_logprobs
-            request_do_logprobs = (do_logprobs and 
-                                   max_logprobs is not None and 
-                                   max_logprobs > 0)
+            request_do_logprobs = (do_logprobs and max_logprobs is not None
+                                   and max_logprobs > 0)
 
             if do_prompt_logprobs:
                 max_prompt_logprobs = request.max_prompt_logprobs
@@ -434,12 +433,12 @@ class Scheduler:
                     # prompt logprobs were requested & a nonzero number of
                     # prompt tokens were computed in this step for this request.
                     #
-                    # Note that this scenario returns an EngineCoreOutput which is
-                    # empty except for the prompt logprobs which were computed
-                    # for these prompt tokens.
+                    # Note that this scenario returns an EngineCoreOutput which
+                    # is empty except for the prompt logprobs which were
+                    # computed for these prompt tokens.
 
                     slice_upper_index = (curr_prompt_base_idx +
-                                        num_new_prompt_tokens + 1)
+                                         num_new_prompt_tokens + 1)
                     prompt_logprob_token_ids = prompt_logprob_token_ids_list[
                         curr_prompt_base_idx:slice_upper_index]
                     prompt_logprob_values = prompt_logprob_values_list[
@@ -458,8 +457,8 @@ class Scheduler:
                         prompt_logprobs = [None] + prompt_logprobs
 
                     prompt_len = len(request.prompt_token_ids)
-                    post_step_prompt_logprob_cnt = (len(request.prompt_logprobs) +
-                                                    len(prompt_logprobs))
+                    post_step_prompt_logprob_cnt = (
+                        len(request.prompt_logprobs) + len(prompt_logprobs))
                     assert post_step_prompt_logprob_cnt <= prompt_len + 1
                     assert post_step_prompt_logprob_cnt != prompt_len
                     if post_step_prompt_logprob_cnt == prompt_len + 1:

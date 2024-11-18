@@ -132,6 +132,17 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
+        if isinstance(params, SamplingParams):
+            # For configurations based on :class:`SamplingParams`, validate each
+            # request's logprobs & prompt logprobs
+            max_logprobs = self.get_model_config().max_logprobs
+            if (params.logprobs and params.logprobs > max_logprobs) or (
+                    params.prompt_logprobs
+                    and params.prompt_logprobs > max_logprobs):
+                raise ValueError(
+                    f"Cannot request more than "
+                    f"{max_logprobs} logprobs or prompt logprobs.")
+
         # 1) Process raw inputs into the request.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
@@ -158,10 +169,11 @@ class LLMEngine:
 
         return request_outputs
 
-    # TODO(rob): Can we get rid of these?
-
     def get_model_config(self):
-        pass
+        """Gets the model configuration."""
+        return self.model_config
+
+    # TODO(rob): Can we get rid of these?
 
     def start_profile(self):
         pass
