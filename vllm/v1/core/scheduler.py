@@ -470,6 +470,7 @@ class Scheduler:
                     prompt_slice_range_upper = request.num_computed_tokens
                     prompt_slice_range_lower = (prompt_slice_range_upper -
                                                 num_new_prompt_tokens)
+                    request.prompt_logprobs.extend(prompt_logprobs)
             else:
                 request_do_prompt_logprobs = False
 
@@ -548,14 +549,14 @@ class Scheduler:
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason,
-                    logprobs=request.logprobs[-num_new_tokens:]
-                    if request_do_logprobs else None,
+                    logprobs=(request.logprobs[-num_new_tokens:]
+                    if request_do_logprobs else None),
                     prompt_logprobs=(
                         prompt_logprobs if request_do_prompt_logprobs else
-                        ([] if request_do_prompt_logprobs else None)),
+                        None),
                     prompt_logprobs_token_ids=(
                         request.prompt_token_ids if request_do_prompt_logprobs
-                        else ([] if request_do_prompt_logprobs else None)))
+                        else None))
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
