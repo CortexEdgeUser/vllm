@@ -165,34 +165,31 @@ def test_get_logprobs_and_prompt_logprobs(
         if (num_top_prompt_logprobs is not None
                 and num_top_prompt_logprobs > 0):
             # Confirm that structure of prompt logprobs in result is correct
-
             assert vllm_result.prompt_logprobs is not None
-            # The first prompt logprob is always None
+            # - The first prompt logprob is always None
             assert vllm_result.prompt_logprobs[0] is None
-            # Prompt logprobs are returned for all indices in
-            # the prompt
+            # - Prompt logprobs are returned for all indices in
+            #   the prompt
             assert len(vllm_result.prompt_logprobs) == len(
                 vllm_result.prompt_token_ids)
             for prompt_logprobs in vllm_result.prompt_logprobs[1:]:
                 assert prompt_logprobs is not None
-                # If the prompt token is not included in the top X
-                # logprob, it can return 1 more data
+                # - If the prompt token is not included in the top X
+                #   logprob, it can return 1 more data
                 assert (len(prompt_logprobs) == num_top_prompt_logprobs
                         or len(prompt_logprobs) == num_top_prompt_logprobs + 1)
 
             # Compare prompt logprobs to HF
-            for vllm_result, hf_logprob in zip(vllm_results, hf_logprobs):
-                # The first prompt logprob is always None, so we compare it from
-                # 1:.
-                vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
-                for i, vllm_prompt_logprob_dict in enumerate(
-                        vllm_prompt_logprobs):
-                    for token_id, logprob in vllm_prompt_logprob_dict.items():
-                        torch.testing.assert_close(
-                            logprob.logprob,
-                            hf_logprob[0][i][token_id].item(),
-                            atol=1e-2,
-                            rtol=1e-2)
+            # The first prompt logprob is always None, so we compare it from
+            # 1:.
+            vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
+            for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
+                for token_id, logprob in vllm_prompt_logprob_dict.items():
+                    torch.testing.assert_close(
+                        logprob.logprob,
+                        hf_logprob[0][i][token_id].item(),
+                        atol=1e-2,
+                        rtol=1e-2)
         else:
             assert vllm_result.prompt_logprobs is None
 
