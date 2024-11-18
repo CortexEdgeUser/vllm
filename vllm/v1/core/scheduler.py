@@ -445,10 +445,12 @@ class Scheduler:
                         curr_prompt_base_idx:slice_upper_index]
                     curr_prompt_base_idx = slice_upper_index
 
+                    logprob_cnt = max_prompt_logprobs
                     prompt_logprobs = [{
                         lpt: Logprob(lpv, (idx + 1), None)
                         for idx, (lpv, lpt) in enumerate(
-                            zip(plp_tok_values, plp_tok_token_ids))
+                            zip(plp_tok_values[0:logprob_cnt],
+                                plp_tok_token_ids[0:logprob_cnt]))
                     } for plp_tok_values, plp_tok_token_ids in zip(
                         prompt_logprob_values, prompt_logprob_token_ids)]
 

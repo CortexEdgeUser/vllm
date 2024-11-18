@@ -45,8 +45,8 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.max_logprobs = max_logprobs
-        self.max_prompt_logprobs = max_prompt_logprobs
+        self.max_logprobs = sampling_params.logprobs
+        self.max_prompt_logprobs = sampling_params.prompt_logprobs
         self.logprobs: Optional[SampleLogprobs] = (None if max_logprobs is None
                                                    else [])
         self.prompt_logprobs: Optional[PromptLogprobs] = (

@@ -62,9 +62,9 @@ def test_get_logprobs_and_prompt_logprobs(
         (0, 0),
         (5, None),
         (3, 0),
+        (6, 3),
         (None, 6),
         (0, 5),
-        (6, 3),
     ]
     # We rely on there being more prompts than combinations of
     # logprobs & prompt logprobs which we want to test
@@ -98,9 +98,10 @@ def test_get_logprobs_and_prompt_logprobs(
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
-    for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
-            vllm_results, hf_logprobs, hf_outputs,
-            logprob_prompt_logprob_list):
+    for rdx, (vllm_result, hf_logprob, hf_output,
+              logprob_prompt_logprob) in enumerate(
+                  zip(vllm_results, hf_logprobs, hf_outputs,
+                      logprob_prompt_logprob_list)):
 
         # Extract request-level (prompt)logprobs config
         num_top_logprobs = logprob_prompt_logprob[0]

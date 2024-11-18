@@ -205,11 +205,10 @@ class IncrementalDetokenizer:
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
-                stop_str, truncate_to = stop
+                _, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
-                stop_reason = stop_str
 
         # TODO: handle stop_token_ids here too?
 
@@ -235,11 +234,6 @@ class IncrementalDetokenizer:
             prompt_logprobs,
             finished,
         )
-
-        if finished:
-            completion_output = request_output.outputs[0]
-            completion_output.finish_reason = finish_reason
-            completion_output.stop_reason = stop_reason
 
         return request_output
 
