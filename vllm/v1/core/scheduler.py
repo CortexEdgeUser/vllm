@@ -409,7 +409,7 @@ class Scheduler:
             curr_prompt_base_idx = 0
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
-        for request in self.running:
+        for ldx, request in enumerate(self.running):
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -438,7 +438,7 @@ class Scheduler:
                     # computed for these prompt tokens.
 
                     slice_upper_index = (curr_prompt_base_idx +
-                                         num_new_prompt_tokens + 1)
+                                         num_new_prompt_tokens)
                     prompt_logprob_token_ids = prompt_logprob_token_ids_list[
                         curr_prompt_base_idx:slice_upper_index]
                     prompt_logprob_values = prompt_logprob_values_list[
@@ -458,14 +458,14 @@ class Scheduler:
                         # Ensure that None is the first prompt logprob
                         prompt_logprobs = [None] + prompt_logprobs
 
-                    prompt_len = len(request.prompt_token_ids)
-                    post_step_prompt_logprob_cnt = (
-                        len(request.prompt_logprobs) + len(prompt_logprobs))
-                    assert post_step_prompt_logprob_cnt <= prompt_len + 1
-                    assert post_step_prompt_logprob_cnt != prompt_len
-                    if post_step_prompt_logprob_cnt == prompt_len + 1:
-                        # Exclude very last logprob
-                        prompt_logprobs = prompt_logprobs[0:-1]
+                    # prompt_len = len(request.prompt_token_ids)
+                    # post_step_prompt_logprob_cnt = (
+                    #     len(request.prompt_logprobs) + len(prompt_logprobs))
+                    # assert post_step_prompt_logprob_cnt <= prompt_len + 1
+                    # assert post_step_prompt_logprob_cnt != prompt_len
+                    # if post_step_prompt_logprob_cnt == prompt_len + 1:
+                    #     # Exclude very last logprob
+                    #     prompt_logprobs = prompt_logprobs[0:-1]
 
                     curr_prompt_base_idx = slice_upper_index
 
@@ -473,6 +473,8 @@ class Scheduler:
                     prompt_slice_range_lower = (prompt_slice_range_upper -
                                                 num_new_prompt_tokens)
                     request.prompt_logprobs.extend(prompt_logprobs)
+                else:
+                    curr_prompt_base_idx += num_new_prompt_tokens
             else:
                 request_do_prompt_logprobs = False
 
