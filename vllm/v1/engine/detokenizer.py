@@ -210,6 +210,11 @@ class IncrementalDetokenizer:
             finished,
         )
 
+        if finished:
+            completion_output = request_output.outputs[0]
+            completion_output.finish_reason = finish_reason
+            completion_output.stop_reason = stop_reason
+
         return request_output
 
     def _get_next_output_text(self, finished: bool, delta: bool) -> str:
