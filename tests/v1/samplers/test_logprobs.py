@@ -15,6 +15,7 @@ MODELS = ["facebook/opt-125m"]
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("detokenize", [True, False])
+@pytest.mark.parametrize("long_prompts", [True, False])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
@@ -22,6 +23,8 @@ def test_get_logprobs_and_prompt_logprobs(
     dtype,
     detokenize: bool,
     example_prompts,
+    example_long_prompts,
+    long_prompts: bool,
     monkeypatch,
 ):
     """Test V1 Engine logprobs & prompt logprobs
@@ -42,24 +45,28 @@ def test_get_logprobs_and_prompt_logprobs(
       dtype
       detokenize: if False, return generated tokens bypassing detokenizer
       example_prompts
+      example_long_prompts
       monkeypatch
     """
+
+    test_prompts = example_long_prompts if long_prompts else example_prompts
 
     # LLM engine v1
     monkeypatch.setenv("VLLM_USE_V1", "1")
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
-    max_num_seqs = 256
-    max_num_batched_tokens = None
+    max_num_seqs = 4
+    max_num_batched_tokens = 4
+    max_model_len = 4
 
     max_tokens = 5
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(
-            example_prompts,
+            test_prompts,
             max_tokens=max_tokens,
         )
         hf_logprobs = hf_model.generate_greedy_logprobs(
-            example_prompts,
+            test_prompts,
             max_tokens=max_tokens,
         )
 
@@ -77,15 +84,15 @@ def test_get_logprobs_and_prompt_logprobs(
     ]
     # We rely on there being more prompts than combinations of
     # logprobs & prompt logprobs which we want to test
-    assert len(example_prompts) >= len(logprob_prompt_logprob_list)
+    assert len(test_prompts) >= len(logprob_prompt_logprob_list)
     # Make sure there is a sample params for each prompt
-    num_extra_params = len(example_prompts) - len(logprob_prompt_logprob_list)
+    num_extra_params = len(test_prompts) - len(logprob_prompt_logprob_list)
     if num_extra_params > 0:
         logprob_prompt_logprob_list = (
             logprob_prompt_logprob_list +
             logprob_prompt_logprob_list[-num_extra_params:])
     # Now the number of prompts should match the number of sample params combos
-    assert len(example_prompts) == len(logprob_prompt_logprob_list)
+    assert len(test_prompts) == len(logprob_prompt_logprob_list)
     # Generate SamplingParams
     vllm_sampling_params = [
         SamplingParams(max_tokens=max_tokens,
@@ -102,9 +109,10 @@ def test_get_logprobs_and_prompt_logprobs(
             max_logprobs=7,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
     ) as vllm_model:
         vllm_results = vllm_model.model.generate(
-            example_prompts, sampling_params=vllm_sampling_params)
+            test_prompts, sampling_params=vllm_sampling_params)
 
     for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
             vllm_results, hf_logprobs, hf_outputs,
