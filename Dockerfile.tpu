@@ -4,9 +4,13 @@ ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:night
 FROM $BASE_IMAGE
 WORKDIR /workspace/vllm
 
-RUN echo "deb http://ftp2.fr.debian.org/debian/ bullseye main contrib non-free\n\
-deb http://ftp2.fr.debian.org/debian/ bullseye-updates main contrib non-free\n\
-deb http://security.debian.org/ bullseye/updates main contrib non-free" > /etc/apt/sources.list
+RUN rm /etc/apt/sources.list
+# Remplacer la première ligne de /etc/apt/sources.list
+RUN echo "deb http://ftp2.fr.debian.org/debian/ bullseye main contrib non-free" > /etc/apt/sources.list
+
+# Ajouter la deuxième ligne à /etc/apt/sources.list
+RUN echo "deb http://ftp2.fr.debian.org/debian/ bullseye-updates main contrib non-free" >> /etc/apt/sources.list
+
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
