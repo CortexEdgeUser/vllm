@@ -3,7 +3,7 @@ ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:night
 
 FROM $BASE_IMAGE
 WORKDIR /workspace/vllm
-
+RUN sleep $(shuf -i 1-30 -n 1)
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
