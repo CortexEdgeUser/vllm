@@ -248,6 +248,13 @@ class Scheduler:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
+        # Now that requests are scheduled, generate a mask indicating which
+        # request is partial
+        partial_running_reqs = [
+            (req.num_computed_tokens + num_scheduled_tokens[req.request_id] <
+             req.num_tokens) for req in self.running
+        ]
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -278,6 +285,7 @@ class Scheduler:
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
+            partial_running_reqs=partial_running_reqs,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -409,7 +417,7 @@ class Scheduler:
             curr_prompt_base_idx = 0
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
-        for ldx, request in enumerate(self.running):
+        for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -723,6 +731,7 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
+    partial_running_reqs: List[bool]  # True if running req is partial
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

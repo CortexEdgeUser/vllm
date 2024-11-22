@@ -55,9 +55,9 @@ def test_get_logprobs_and_prompt_logprobs(
     monkeypatch.setenv("VLLM_USE_V1", "1")
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
-    max_num_seqs = 4
-    max_num_batched_tokens = 4
-    max_model_len = 4
+    max_num_seqs = 128
+    max_num_batched_tokens = 128
+    max_model_len = 128
 
     max_tokens = 5
     with hf_runner(model, dtype=dtype) as hf_model:
@@ -110,6 +110,7 @@ def test_get_logprobs_and_prompt_logprobs(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
+            enforce_eager=True,
     ) as vllm_model:
         vllm_results = vllm_model.model.generate(
             test_prompts, sampling_params=vllm_sampling_params)

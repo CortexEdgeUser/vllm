@@ -342,19 +342,15 @@ class GPUModelRunner:
         self,
         sampling_metadata: SamplingMetadata,
         prompt_logits: Optional[torch.Tensor],
-        seq_start_loc: torch.Tensor,
-        num_generated_tokens: int,
+        num_prompt_tokens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Compute prompt lens
-        prompt_lens = torch.diff(seq_start_loc) - num_generated_tokens
-
         max_num_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs
         assert max_num_prompt_logprobs > 0
 
         prompt_logits = self.model.sampler.apply_temperature(
             prompt_logits,
             torch.repeat_interleave(sampling_metadata.temperature,
-                                    prompt_lens))
+                                    num_prompt_tokens))
         prompt_logits = self.model.sampler.apply_top_k_top_p(
             prompt_logits, sampling_metadata)
         prompt_logprobs = self.model.sampler.get_logprobs(prompt_logits)
@@ -489,20 +485,27 @@ class GPUModelRunner:
         hidden_states = hidden_states[:num_scheduled_tokens]
         if do_prompt_logprobs:
             # One or more requests require prompt logprobs
+            complete_req_mask = torch.tensor(
+                [not x for x in scheduler_output.partial_running_reqs])
             logits = self.model.compute_logits(hidden_states, None)
             mask = torch.ones(num_input_tokens, dtype=torch.bool)
-            mask[logits_indices] = False
+            # Sampling indices for requests where we will actually
+            # hold onto the sampled value (i.e. not partial.)
+            sample_indices = logits_indices[complete_req_mask]
+            mask[sample_indices] = False
             prompt_logits = logits[mask, :]
             logits = logits[logits_indices, :]
 
             if prompt_logits.shape[0] > 0:
+                num_prompt_tokens = (
+                    torch.diff(attn_metadata.query_start_loc) -
+                    complete_req_mask.int().cuda())
                 (
                     prompt_logprob_token_ids,
                     prompt_logprobs,
                 ) = self._compute_prompt_logprobs(sampling_metadata,
                                                   prompt_logits,
-                                                  attn_metadata.seq_start_loc,
-                                                  1)
+                                                  num_prompt_tokens)
             else:
                 prompt_logprob_token_ids = torch.empty(
                     (0, sampling_metadata.max_num_prompt_logprobs),
