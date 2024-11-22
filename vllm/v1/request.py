@@ -19,8 +19,6 @@ class Request:
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
-        max_logprobs: Optional[int],
-        max_prompt_logprobs: Optional[int],
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -47,10 +45,10 @@ class Request:
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.max_logprobs = sampling_params.logprobs
         self.max_prompt_logprobs = sampling_params.prompt_logprobs
-        self.logprobs: Optional[SampleLogprobs] = (None if max_logprobs is None
-                                                   else [])
+        self.logprobs: Optional[SampleLogprobs] = (
+            None if self.max_logprobs is None else [])
         self.prompt_logprobs: Optional[PromptLogprobs] = (
-            None if max_prompt_logprobs is None else [])
+            None if self.max_prompt_logprobs is None else [])
         self.num_computed_tokens = 0
 
         # Raw multimodal data before the mm input mapper (e.g., PIL images).
@@ -80,8 +78,6 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
-            max_logprobs=request.sampling_params.logprobs,
-            max_prompt_logprobs=request.sampling_params.prompt_logprobs,
         )
 
     @property

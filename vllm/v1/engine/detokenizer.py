@@ -105,7 +105,7 @@ class IncrementalDetokenizer:
             logprobs=[] if do_logprobs else None,
             prompt_logprobs=[] if do_prompt_logprobs else None)
 
-    def add_tokens_maybe_logprobs(
+    def add_tokens(
         self,
         new_token_ids: List[int],
         new_logprobs: Optional[SampleLogprobs],
@@ -210,6 +210,11 @@ class IncrementalDetokenizer:
             finished,
         )
 
+        if finished:
+            completion_output = request_output.outputs[0]
+            completion_output.finish_reason = finish_reason
+            completion_output.stop_reason = stop_reason
+
         return request_output
 
     def _get_next_output_text(self, finished: bool, delta: bool) -> str:
@@ -291,7 +296,7 @@ class Detokenizer:
                 continue
 
             # Detokenize and update state.
-            request_output = detokenizer.add_tokens_maybe_logprobs(
+            request_output = detokenizer.add_tokens(
                 new_token_ids=engine_core_output.new_token_ids,
                 new_logprobs=engine_core_output.logprobs,
                 new_prompt_logprobs=engine_core_output.prompt_logprobs,
