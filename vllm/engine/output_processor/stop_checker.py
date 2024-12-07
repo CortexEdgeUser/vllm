@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -67,13 +67,9 @@ class StopChecker:
             return
 
         # Check if any stop strings are matched.
-        stop = self.check_stop_strings(
-            seq.output_text, new_char_count, sampling_params.stop,
-            sampling_params.include_stop_str_in_output)
-        if stop is not None:
-            stop_str, truncate_to = stop
-            if truncate_to != -1:
-                seq.output_text = seq.output_text[:truncate_to]
+        stop_str = self._check_stop_strings(seq, new_char_count,
+                                            sampling_params)
+        if stop_str is not None:
             seq.status = SequenceStatus.FINISHED_STOPPED
             seq.stop_reason = stop_str
             return
@@ -89,40 +85,33 @@ class StopChecker:
             return
 
     @staticmethod
-    def check_stop_strings(
-        output_text: str,
-        new_char_count: int,
-        stop: List[str],
-        include_in_output: bool,
-    ) -> Optional[Tuple[str, int]]:
+    def _check_stop_strings(seq: Sequence, new_char_count: int,
+                            sampling_params: SamplingParams) -> Optional[str]:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 
-        Returns tuple (stop_string, offset) if matched or else None.
-
-        Where stop_string is the matched stop string and offset is the
-        length to which output_text should be truncated, or -1 for no
-        truncation.
+        Returns the stop string if matched or else None.
         """
-        if not new_char_count or not stop:
+        if not new_char_count or not sampling_params.stop:
             return None
 
-        for stop_str in stop:
+        for stop_str in sampling_params.stop:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
-            stop_index = output_text.find(stop_str,
-                                          -new_char_count - stop_string_len)
+            stop_index = seq.output_text.find(
+                stop_str, -new_char_count - stop_string_len)
             if stop_index == -1:
                 continue
 
-            if include_in_output:
+            if sampling_params.include_stop_str_in_output:
                 # Truncate to end of stop string.
                 stop_index += stop_string_len
-                if stop_index >= len(output_text):
+                if stop_index >= len(seq.output_text):
                     # No truncation required.
-                    return stop_str, -1
+                    return stop_str
 
             # Truncate the output text to either the beginning
             # or end of the stop string.
-            return stop_str, stop_index
+            seq.output_text = seq.output_text[:stop_index]
+            return stop_str
         return None

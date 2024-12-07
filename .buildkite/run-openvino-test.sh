@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # This script build the OpenVINO docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -ex
@@ -13,4 +11,4 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --network host --env VLLM_OPENVINO_KVCACHE_SPACE=1 --name openvino-test openvino-test python3 /workspace/examples/offline_inference.py
+docker run --network host --env VLLM_OPENVINO_KVCACHE_SPACE=1 --name openvino-test openvino-test python3 /workspace/vllm/examples/offline_inference.py

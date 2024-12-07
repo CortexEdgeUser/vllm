@@ -1,3 +1,4 @@
+# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/models/olmo/modeling_olmo.py
 # Copyright 2024 The vLLM team.
@@ -20,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OLMo model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -28,7 +29,7 @@ from transformers import OlmoConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -37,7 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -46,8 +47,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class OlmoAttention(nn.Module):
@@ -62,7 +62,6 @@ class OlmoAttention(nn.Module):
         config: OlmoConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -102,8 +101,7 @@ class OlmoAttention(nn.Module):
                               self.head_dim,
                               scale=self.scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              quant_config=quant_config)
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -186,14 +184,10 @@ class OlmoDecoderLayer(nn.Module):
     def __init__(self,
                  config: OlmoConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         # Attention block.
-        self.self_attn = OlmoAttention(config,
-                                       cache_config,
-                                       quant_config,
-                                       prefix=f"{prefix}.self_attn")
+        self.self_attn = OlmoAttention(config, cache_config, quant_config)
 
         # MLP block.
         self.mlp = OlmoMLP(config, quant_config)
@@ -231,21 +225,20 @@ class OlmoDecoderLayer(nn.Module):
 @support_torch_compile
 class OlmoModel(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 config: OlmoConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: OlmoDecoderLayer(config, cache_config, quant_config
+                                            ),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size,
                                  elementwise_affine=False,
@@ -254,9 +247,6 @@ class OlmoModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -264,16 +254,17 @@ class OlmoModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
         """
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            # Get embeddings of input.
+            # shape: (batch_size, seq_len, d_model)
+            inputs_embeds = self.embed_tokens(input_ids)
+
+            # embed positions
+            hidden_states = inputs_embeds
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -301,13 +292,13 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
     Extremely barebones HF model wrapper.
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 config: OlmoConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.config = config
-        self.model = OlmoModel(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
+        self.model = OlmoModel(config, cache_config, quant_config)
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
@@ -319,12 +310,9 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
                 quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -333,7 +321,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(
             input_ids=input_ids,
@@ -341,7 +328,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
@@ -362,8 +348,7 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -373,7 +358,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -410,5 +394,3 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params

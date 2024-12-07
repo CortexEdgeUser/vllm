@@ -2,8 +2,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Mapping, Optional, Union, overload
 
-from typing_extensions import deprecated
-
 from vllm import PoolingParams
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
@@ -34,8 +32,7 @@ class RPCProcessRequest:
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
 
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
+    @overload  # DEPRECATED
     def __init__(
         self,
         *,

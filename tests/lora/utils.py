@@ -7,10 +7,9 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 
 class DummyLoRAManager:
 
-    def __init__(self, device: torch.device = "cuda:0"):
+    def __init__(self):
         super().__init__()
         self._loras: Dict[str, LoRALayerWeights] = {}
-        self._device = device
 
     def set_module_lora(self, module_name: str, lora: LoRALayerWeights):
         self._loras[module_name] = lora
@@ -29,16 +28,16 @@ class DummyLoRAManager:
             lora_alpha=1,
             lora_a=torch.rand([weight.shape[1], rank],
                               dtype=weight.dtype,
-                              device=self._device),
+                              device="cuda"),
             lora_b=torch.rand([rank, weight.shape[0]],
                               dtype=weight.dtype,
-                              device=self._device),
+                              device="cuda"),
         )
         if generate_embeddings_tensor:
             lora.embeddings_tensor = torch.rand(5,
                                                 generate_embeddings_tensor,
                                                 dtype=weight.dtype,
-                                                device=self._device)
+                                                device="cuda")
         self.set_module_lora(module_name, lora)
 
         return lora

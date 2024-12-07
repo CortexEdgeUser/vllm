@@ -1,6 +1,5 @@
 import json
 import pathlib
-from concurrent.futures.thread import ThreadPoolExecutor
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
@@ -12,16 +11,14 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption,
                                          ConversationMessage,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
-                                         parse_chat_messages_futures,
-                                         resolve_chat_template_content_format)
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
@@ -47,7 +44,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import AtomicCounter, is_list_of, make_async
+from vllm.utils import AtomicCounter, is_list_of
 
 logger = init_logger(__name__)
 
@@ -140,14 +137,6 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-
-        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-
-        self._tokenize_prompt_input_async = make_async(
-            self._tokenize_prompt_input, executor=self._tokenizer_executor)
-        self._tokenize_prompt_input_or_inputs_async = make_async(
-            self._tokenize_prompt_input_or_inputs,
-            executor=self._tokenizer_executor)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -377,7 +366,7 @@ class OpenAIServing:
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> List[TextTokensPrompt]:
+    ) -> Iterator[TextTokensPrompt]:
         """
         Tokenize/detokenize depending on the input format.
 
@@ -385,41 +374,45 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
-        # Although our type checking is based on mypy,
-        # VSCode Pyright extension should still work properly
-        # "is True" is required for Pyright to perform type narrowing
-        # See: https://github.com/microsoft/pyright/issues/7672
-        return [
-            self._normalize_prompt_text_to_input(
-                request,
-                tokenizer,
-                prompt=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
-            self._normalize_prompt_tokens_to_input(
-                request,
-                tokenizer,
-                prompt_ids=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens)
-            for prompt_input in parse_and_batch_prompt(input_or_inputs)
-        ]
+        for prompt_input in parse_and_batch_prompt(input_or_inputs):
+            # Although our type checking is based on mypy,
+            # VSCode Pyright extension should still work properly
+            # "is True" is required for Pyright to perform type narrowing
+            # See: https://github.com/microsoft/pyright/issues/7672
+            if prompt_input["is_tokens"] is False:
+                yield self._normalize_prompt_text_to_input(
+                    request,
+                    tokenizer,
+                    prompt=prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=add_special_tokens,
+                )
+            else:
+                yield self._normalize_prompt_tokens_to_input(
+                    request,
+                    tokenizer,
+                    prompt_ids=prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                )
 
-    async def _preprocess_completion(
+    def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Tuple[List[TextTokensPrompt], List[TokensPrompt]]:
-        request_prompts = await self._tokenize_prompt_input_or_inputs_async(
-            request,
-            tokenizer,
-            input_or_inputs,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            add_special_tokens=add_special_tokens,
-        )
+    ) -> Tuple[Sequence[TextTokensPrompt], List[TokensPrompt]]:
+        request_prompts = [
+            request_prompt
+            for request_prompt in self._tokenize_prompt_input_or_inputs(
+                request,
+                tokenizer,
+                input_or_inputs,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                add_special_tokens=add_special_tokens,
+            )
+        ]
 
         engine_prompts = [
             TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])
@@ -433,8 +426,7 @@ class OpenAIServing:
         request: ChatLikeRequest,
         tokenizer: AnyTokenizer,
         messages: List[ChatCompletionMessageParam],
-        chat_template: Optional[str],
-        chat_template_content_format: ChatTemplateContentFormatOption,
+        chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tool_dicts: Optional[List[Dict[str, Any]]] = None,
@@ -445,26 +437,11 @@ class OpenAIServing:
         add_special_tokens: bool = False,
     ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
                List[TokensPrompt]]:
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            chat_template_content_format,
-            tokenizer,
-        )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
             self.model_config,
             tokenizer,
-            content_format=resolved_content_format,
         )
-
-        _chat_template_kwargs: Dict[str, Any] = dict(
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message,
-            tools=tool_dicts,
-            documents=documents,
-        )
-        _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, List[int]]
         is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
@@ -472,33 +449,36 @@ class OpenAIServing:
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
-                **_chat_template_kwargs,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=continue_final_message,
+                tools=tool_dicts,
+                documents=documents,
+                **(chat_template_kwargs or {}),
             )
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer,
                 conversation=conversation,
-                **_chat_template_kwargs,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=continue_final_message,
+                tools=tool_dicts,
+                documents=documents,
+                **(chat_template_kwargs or {}),
             )
 
         mm_data = await mm_data_future
 
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        should_parse_tools = tool_parser is not None and (hasattr(
-            request, "tool_choice") and request.tool_choice != "none")
-
-        if should_parse_tools:
+        if tool_parser is not None:
             if not isinstance(request, ChatCompletionRequest):
                 msg = "Tool usage is only supported for Chat Completions API"
                 raise NotImplementedError(msg)
 
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request)
+            request = tool_parser(tokenizer).adjust_request(request=request)
 
         if isinstance(request_prompt, str):
-            prompt_inputs = await self._tokenize_prompt_input_async(
+            prompt_inputs = self._tokenize_prompt_input(
                 request,
                 tokenizer,
                 request_prompt,

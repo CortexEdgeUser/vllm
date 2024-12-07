@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +14,7 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import numpy as np
@@ -33,8 +34,7 @@ from transformers.models.mllama.processing_mllama import (
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.selector import _Backend
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DummyData, EncoderDecoderInputs,
                          InputContext, TokenInputs, token_inputs)
@@ -45,7 +45,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -57,7 +57,6 @@ from vllm.utils import is_list_of
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
 from .llama import LlamaDecoderLayer, LlamaMLP
-from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 MLLAMA_IMAGE_TOKEN_ID = 128256
@@ -800,13 +799,12 @@ class MllamaTextCrossAttention(nn.Module):
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask(q, k, v, kv_cache,
-                                               attention_mask,
-                                               kv_range_for_decode,
-                                               attn_metadata)
+            output = self.attention_with_mask(q, k, v, kv_cache,
+                                              attention_mask,
+                                              kv_range_for_decode,
+                                              attn_metadata)
         else:
-            output = self.attn(q.view(-1,
-                                      self.num_local_heads * self.head_dim),
+            output = self.attn(q,
                                k,
                                v,
                                kv_cache,
@@ -815,7 +813,7 @@ class MllamaTextCrossAttention(nn.Module):
         out, _ = self.o_proj(output)
         return out
 
-    def _attention_with_mask(
+    def attention_with_mask(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -826,36 +824,14 @@ class MllamaTextCrossAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
-        if len(kv_cache.shape) > 1:
-            if self.attn.backend in (_Backend.FLASH_ATTN,
-                                     _Backend.FLASH_ATTN_VLLM_V1):
-                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    cached_k,
-                    cached_v,
-                    kv_cache[0],
-                    kv_cache[1],
-                    attn_metadata.
-                    cross_slot_mapping,  # type: ignore[union-attr]
-                    "auto",
-                    1.0,
-                    1.0,
-                )
-            elif self.attn.backend in (_Backend.XFORMERS, _Backend.TORCH_SDPA):
-                key_cache, value_cache = PagedAttention.split_kv_cache(
-                    kv_cache, self.num_local_key_value_heads, self.head_dim)
-                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
-                PagedAttention.write_to_paged_cache(
-                    cached_k, cached_v, key_cache, value_cache,
-                    attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
-            else:
-                raise ValueError(
-                    f"Unsupported Attention backend {self.attn.backend} "
-                    "enum found. Expected the Attention backend to be "
-                    "FLASH_ATTN, FLASH_ATTN_VLLM_V1, XFORMERS or TORCH_SDPA.")
-
+        if len(kv_cache.shape) == 3:
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_local_key_value_heads, self.head_dim)
+            cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
+            cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+            PagedAttention.write_to_paged_cache(
+                cached_k, cached_v, key_cache, value_cache,
+                attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a
         # standard causal mask, neither a block diagonal mask which
@@ -964,12 +940,14 @@ class MllamaTextModel(nn.Module):
     config_class = config_mllama.MllamaTextConfig
     base_model_prefix = "model"
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: config_mllama.MllamaTextConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-
-        config = vllm_config.model_config.hf_config.text_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1052,14 +1030,18 @@ class MllamaForCausalLM(nn.Module):
         "MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"
     ]
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: config_mllama.MllamaTextConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-
-        config = vllm_config.model_config.hf_config.text_config
-        quant_config = vllm_config.quant_config
-
         self.vocab_size = config.vocab_size
-        self.model = MllamaTextModel(vllm_config=vllm_config,
+        self.model = MllamaTextModel(config,
+                                     cache_config,
+                                     quant_config,
                                      prefix=f"{prefix}.model")
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -1104,6 +1086,20 @@ class MllamaForCausalLM(nn.Module):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+        ".fc1.",
+        ".fc2.",
+        # The `multi_modal_projector` is at the top level of the model,
+        # so we can't add a dot in front of it.
+        "multi_modal_projector."
+    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -1113,10 +1109,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 config: config_mllama.MllamaConfig,
+                 multimodal_config: MultiModalConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
         self.max_num_tiles = config.vision_config.max_num_tiles
@@ -1127,11 +1125,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.vision_model = MllamaVisionModel(config.vision_config,
                                               quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "vision_model"))
+                                              prefix="vision_model")
         self.language_model = MllamaForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
+            config.text_config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix="language_model",
         )
         self.multi_modal_projector = ColumnParallelLinear(
             config.vision_config.vision_output_dim,
@@ -1139,11 +1138,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             bias=True,
             quant_config=quant_config,
             gather_output=True,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            prefix="multi_modal_projector",
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
 
     def compute_logits(
         self,
@@ -1164,7 +1163,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
-        # MultiModalKwargs.batch, so pixel_values here can be:
+        # MultiModalInputs.batch, so pixel_values here can be:
         #   - List[List[torch.Tensor]]:
         #       with shape (num_tiles, 3, image_res, image_res)
         #   - List[torch.Tensor]:
@@ -1413,8 +1412,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1424,7 +1422,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        updated_params: Set[str] = set()
+        updated_params = set()
         for name, loaded_weight in weights:
             if 'patch_embedding.weight' in name:
                 name = name.replace('patch_embedding.weight',
@@ -1444,8 +1442,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                updated_params.add(name)
-        return updated_params
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:

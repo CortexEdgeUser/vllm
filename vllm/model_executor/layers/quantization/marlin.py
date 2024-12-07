@@ -110,6 +110,9 @@ class MarlinConfig(QuantizationConfig):
             return MarlinLinearMethod(self)
         return None
 
+    def get_scaled_act_names(self) -> List[str]:
+        return []
+
 
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.

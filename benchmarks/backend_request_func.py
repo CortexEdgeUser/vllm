@@ -24,7 +24,6 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     logprobs: Optional[int] = None
-    extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
 
@@ -37,7 +36,6 @@ class RequestFuncOutput:
     ttft: float = 0.0  # Time to first token
     itl: List[float] = field(
         default_factory=list)  # List of inter-token latencies
-    tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
 
@@ -56,7 +54,6 @@ async def async_request_tgi(
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
-            "truncate": request_func_input.prompt_len,
             # TGI does not accept ignore_eos flag.
         }
         payload = {
@@ -82,7 +79,7 @@ async def async_request_tgi(
                         # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
-                        chunk = chunk_bytes.removeprefix("data:")
+                        chunk = remove_prefix(chunk_bytes, "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
@@ -147,8 +144,8 @@ async def async_request_trt_llm(
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data:")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data:")
 
                         data = json.loads(chunk)
                         output.generated_text += data["text_output"]
@@ -244,8 +241,6 @@ async def async_request_openai_completions(
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
-        if request_func_input.extra_body:
-            payload.update(request_func_input.extra_body)
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
@@ -261,14 +256,13 @@ async def async_request_openai_completions(
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
                 if response.status == 200:
-                    first_chunk_received = False
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -280,8 +274,7 @@ async def async_request_openai_completions(
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
-                                if not first_chunk_received:
-                                    first_chunk_received = True
+                                if ttft == 0.0:
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
 
@@ -292,14 +285,9 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
-                    if first_chunk_received:
-                        output.success = True
-                    else:
-                        output.success = False
-                        output.error = (
-                            "Never received a valid chunk to calculate TTFT."
-                            "This response will be marked as failed!")
+
                     output.generated_text = generated_text
+                    output.success = True
                     output.latency = latency
                 else:
                     output.error = response.reason or ""
@@ -340,8 +328,6 @@ async def async_request_openai_chat_completions(
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
-        if request_func_input.extra_body:
-            payload.update(request_func_input.extra_body)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
@@ -363,8 +349,8 @@ async def async_request_openai_chat_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -401,6 +387,14 @@ async def async_request_openai_chat_completions(
     if pbar:
         pbar.update(1)
     return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
+# introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 def get_model(pretrained_model_name_or_path: str) -> str:

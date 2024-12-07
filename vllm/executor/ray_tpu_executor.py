@@ -69,6 +69,14 @@ class RayTPUExecutor(TPUExecutor):
                 placement_group_bundle_index=bundle_id,
             )
 
+            assert self.speculative_config is None
+            if self.scheduler_config.is_multi_step:
+                worker_module_name = "vllm.worker.multi_step_tpu_worker"
+                worker_class_name = "MultiStepTPUWorker"
+            else:
+                worker_module_name = "vllm.worker.tpu_worker"
+                worker_class_name = "TPUWorker"
+
             # GKE does not fetch environment information from metadata server
             # and instead sets these from within the Ray process. Therefore we
             # need to override the Ray environment variables manually.
@@ -87,7 +95,11 @@ class RayTPUExecutor(TPUExecutor):
                 resources={"TPU": 1},
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
+            )(RayWorkerWrapper).remote(
+                worker_module_name=worker_module_name,
+                worker_class_name=worker_class_name,
+                trust_remote_code=self.model_config.trust_remote_code,
+            )
             if override_env:
                 worker.override_env_vars.remote(override_env)
 
@@ -97,7 +109,10 @@ class RayTPUExecutor(TPUExecutor):
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
                 self.driver_worker = RayWorkerWrapper(
-                    vllm_config=self.vllm_config)
+                    worker_module_name=worker_module_name,
+                    worker_class_name=worker_class_name,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)

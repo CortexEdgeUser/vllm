@@ -1,3 +1,4 @@
+
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 
@@ -7,9 +8,6 @@
 #elif defined(__POWER9_VECTOR__)
   //ppc implementation
   #include "cpu_types_vsx.hpp"
-#elif defined(__aarch64__)
-  //arm implementation
-  #include "cpu_types_arm.hpp"
 #else
   #warning "unsupported vLLM cpu implementation"
 #endif

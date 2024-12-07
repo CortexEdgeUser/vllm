@@ -262,6 +262,13 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
+    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
+                               block_ids: List[int],
+                               skip_last_block_id: bool) -> List[int]:
+        """No prefix caching here => return empty list
+        """
+        return []
+
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
@@ -321,10 +328,6 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
-
-    def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
-        # Not applicable for naive block allocator.
-        return []
 
 
 class NaiveBlock(Block):

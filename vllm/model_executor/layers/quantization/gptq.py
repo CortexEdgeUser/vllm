@@ -80,6 +80,9 @@ class GPTQConfig(QuantizationConfig):
             return GPTQLinearMethod(self)
         return None
 
+    def get_scaled_act_names(self) -> List[str]:
+        return []
+
 
 class ExllamaState(Enum):
 
@@ -210,6 +213,7 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # for torch.compile
+        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)

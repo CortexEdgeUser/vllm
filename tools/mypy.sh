@@ -1,19 +1,18 @@
 #!/bin/bash
 
 CI=${1:-0}
-PYTHON_VERSION=${2:-3.9}
 
-if [ "$CI" -eq 1 ]; then
+if [ $CI -eq 1 ]; then
     set -e
 fi
 
 run_mypy() {
     echo "Running mypy on $1"
-    if [ "$CI" -eq 1 ] && [ -z "$1" ]; then
-        mypy --python-version "${PYTHON_VERSION}" "$@"
+    if [ $CI -eq 1 ] && [ -z "$1" ]; then
+        mypy "$@"
         return
     fi
-    mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
+    mypy --follow-imports skip "$@"
 }
 
 run_mypy # Note that this is less strict than CI

@@ -14,6 +14,7 @@ models = [
     "h2oai/h2ovl-mississippi-800m",  # Replace with your actual model names
     "h2oai/h2ovl-mississippi-2b",
 ]
+target_dtype = "bfloat16"
 
 
 def run_preprocessing_test(

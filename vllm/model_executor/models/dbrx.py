@@ -1,10 +1,11 @@
-from typing import Iterable, List, Optional, Set, Tuple, Union
+# coding=utf-8
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -25,8 +26,7 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class DbrxRouter(nn.Module):
@@ -154,7 +154,6 @@ class DbrxAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -209,8 +208,7 @@ class DbrxAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -236,14 +234,10 @@ class DbrxFusedNormAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = DbrxAttention(config,
-                                  cache_config,
-                                  quant_config,
-                                  prefix=f"{prefix}.attn")
+        self.attn = DbrxAttention(config, cache_config, quant_config)
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -275,14 +269,10 @@ class DbrxBlock(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.norm_attn_norm")
+        self.norm_attn_norm = DbrxFusedNormAttention(config, cache_config,
+                                                     quant_config)
         self.ffn = DbrxMoE(config, quant_config)
 
     def forward(
@@ -305,21 +295,21 @@ class DbrxBlock(nn.Module):
 
 class DbrxModel(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: DbrxConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: DbrxBlock(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: DbrxBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.blocks",
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
@@ -332,9 +322,6 @@ class DbrxModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.d_model))
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.wte(input_ids)
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -342,13 +329,9 @@ class DbrxModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = self.wte(input_ids)
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
@@ -368,19 +351,20 @@ class DbrxModel(nn.Module):
 
 class DbrxForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: DbrxConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.config = config
         if config.tie_word_embeddings:
             raise ValueError(
                 "tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = DbrxModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(
-                                         prefix, "transformer"))
+        self.transformer = DbrxModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -390,12 +374,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -404,11 +385,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+                                         attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(
@@ -428,15 +407,13 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
         expert_params_mapping = [(
             "w13_weight" if weight_name in ["w1", "v1"] else "w2_weight",
             f"mlp.{weight_name}",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
@@ -460,5 +437,3 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params

@@ -20,11 +20,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.filename, 'rb') as f:
-        data = pickle.load(f)
-        raw_results: List[TMeasurement] = data["results"]
+        data: List[TMeasurement] = pickle.load(f)
 
     results = defaultdict(lambda: list())
-    for v in raw_results:
+    for v in data:
         result = re.search(r"MKN=\(\d+x(\d+x\d+)\)", v.task_spec.sub_label)
         if result is not None:
             KN = result.group(1)

@@ -17,21 +17,26 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
+# FIXME: Move this to confest
+MODELS = [
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     hf_hub_download("bartowski/Llama-3.2-1B-Instruct-GGUF",
+                     filename="Llama-3.2-1B-Instruct-Q4_K_M.gguf")),
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     hf_hub_download("bartowski/Llama-3.2-1B-Instruct-GGUF",
+                     filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf")),
+    ("Qwen/Qwen2-1.5B-Instruct",
+     hf_hub_download("Qwen/Qwen2-1.5B-Instruct-GGUF",
+                     filename="qwen2-1_5b-instruct-q4_k_m.gguf")),
+    ("Qwen/Qwen2-1.5B-Instruct",
+     hf_hub_download("legraphista/Qwen2-1.5B-Instruct-IMat-GGUF",
+                     filename="Qwen2-1.5B-Instruct.IQ4_XS.gguf")),
+]
+
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
                     reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize(("original_model", "gguf_id", "gguf_path"), [
-    ("meta-llama/Llama-3.2-1B-Instruct",
-     "bartowski/Llama-3.2-1B-Instruct-GGUF",
-     "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
-    ("meta-llama/Llama-3.2-1B-Instruct",
-     "bartowski/Llama-3.2-1B-Instruct-GGUF",
-     "Llama-3.2-1B-Instruct-IQ4_XS.gguf"),
-    ("Qwen/Qwen2-1.5B-Instruct", "Qwen/Qwen2-1.5B-Instruct-GGUF",
-     "qwen2-1_5b-instruct-q4_k_m.gguf"),
-    ("Qwen/Qwen2-1.5B-Instruct", "legraphista/Qwen2-1.5B-Instruct-IMat-GGUF",
-     "Qwen2-1.5B-Instruct.IQ4_XS.gguf"),
-])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -40,9 +45,7 @@ def test_models(
     num_gpus_available,
     vllm_runner,
     example_prompts,
-    original_model,
-    gguf_id,
-    gguf_path,
+    model,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -51,7 +54,7 @@ def test_models(
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    gguf_model = hf_hub_download(gguf_id, filename=gguf_path)
+    original_model, gguf_model = model
 
     tokenizer = AutoTokenizer.from_pretrained(original_model)
     messages = [[{

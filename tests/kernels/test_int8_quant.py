@@ -7,10 +7,11 @@ from vllm._custom_ops import scaled_int8_quant
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 5137, 8193]  # Arbitrary values for testing
+HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
+                8193]  # Arbitrary values for testing
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
-SCALE = [0.1, 2.1]
+SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
 
 def opcheck_int8_quant_static(output, input, scale, azp=None):
@@ -86,7 +87,10 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     assert torch_out.min() >= int8_traits.min and torch_out.max(
     ) <= int8_traits.max
 
-    ops_out, scales_out, azp_out = scaled_int8_quant(x, symmetric=False)
+    ops_out = torch.empty_like(x, dtype=torch.int8)
+    scales_out = torch.empty_like(scales, dtype=torch.float32)
+    azp_out = torch.empty_like(azps, dtype=torch.int32)
+    torch.ops._C.dynamic_scaled_int8_quant(ops_out, x, scales_out, azp_out)
 
     if (not torch.allclose(scales_out, scales)):
         print(torch.argmax(torch.abs(scales_out - scales)))
@@ -116,8 +120,7 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     out1 = (x / scale_arg).round().clamp(int8_traits.min,
                                          int8_traits.max).to(torch.int8)
-    out2, scale2, _ = scaled_int8_quant(x, scale_arg)
-    assert scale2 is scale_arg
+    out2, _, _ = scaled_int8_quant(x, scale_arg)
 
     # big atol to account for rounding errors
     torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)
@@ -129,7 +132,7 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE)
+@pytest.mark.parametrize("scale", SCALE[2:])  # Reduce test time
 @pytest.mark.parametrize("azp", [-255, 54])
 @torch.inference_mode()
 def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
@@ -143,15 +146,11 @@ def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
 
     out1 = ((x / scale).round() + azp).clamp(int8_traits.min,
                                              int8_traits.max).to(torch.int8)
+    out2 = torch.empty_like(x, dtype=torch.int8)
     scale_arg = torch.tensor([scale], dtype=torch.float32, device="cuda")
     azp_arg = torch.tensor([azp], dtype=torch.int32, device="cuda")
 
-    out2, scale2, azp2 = scaled_int8_quant(x,
-                                           scale_arg,
-                                           azp_arg,
-                                           symmetric=False)
-    assert scale2 is scale_arg
-    assert azp2 is azp_arg
+    torch.ops._C.static_scaled_int8_quant(out2, x, scale_arg, azp_arg)
 
     # big atol to account for rounding errors
     torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)
@@ -186,5 +185,6 @@ def test_static_scaled_int8_azp_quant_saturating_cast(is_max: bool) -> None:
     val_i8 = int8_traits.max if is_max else int8_traits.min
     expected = torch.full((1, 5), val_i8, dtype=torch.int8, device="cuda")
 
-    out, _, _ = scaled_int8_quant(x, scale, azp, symmetric=False)
+    out = torch.empty_like(expected)
+    torch.ops._C.static_scaled_int8_quant(out, x, scale, azp)
     torch.testing.assert_close(expected, out, atol=0, rtol=0)

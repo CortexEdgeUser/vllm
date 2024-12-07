@@ -18,7 +18,7 @@ from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs, MultiModalPlaceholderMap,
+                             MultiModalInputs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
@@ -160,7 +160,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -191,16 +191,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 mm_data, placeholder_maps = MultiModalPlaceholderMap \
                     .from_seq_group(seq_group_metadata, positions_range)
 
-                if self.runner.mm_registry.has_processor(
-                        self.runner.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.runner.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
-
-                multi_modal_kwargs_list.append(mm_kwargs)
+                mm_kwargs = self.runner.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
 
                 for modality, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[modality].extend(
@@ -272,7 +264,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             block_tables=torch.tensor([], device=self.device, dtype=torch.int),
         )
 
-        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
@@ -573,7 +565,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device))
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:

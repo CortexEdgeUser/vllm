@@ -5,14 +5,13 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from functools import partial
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -24,6 +23,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+try:
+    from xformers import ops as xops
+    USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -181,9 +186,6 @@ class InternParallelAttention(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
-
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
@@ -205,9 +207,15 @@ class InternParallelAttention(nn.Module):
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
 
-        out = self.attn(q, k, v)
-        out, _ = self.proj(out)
-        return out
+        q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
+        k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
+        v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
+
+        x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+        x = x.view(B, N, -1)
+
+        x, _ = self.proj(x)
+        return x
 
 
 class InternSdpaAttention(nn.Module):
@@ -354,7 +362,7 @@ class InternVisionEncoderLayer(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
 
-        if (num_heads + num_dummy_heads) % tp_size == 0:
+        if USE_XFORMERS_OPS and (num_heads + num_dummy_heads) % tp_size == 0:
             return InternParallelAttention(config,
                                            quant_config=quant_config,
                                            num_dummy_heads=num_dummy_heads,
@@ -461,14 +469,10 @@ class InternVisionModel(nn.Module):
 
         return encoder_outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params

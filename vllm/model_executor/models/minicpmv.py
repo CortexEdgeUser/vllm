@@ -1,3 +1,4 @@
+# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -22,9 +23,9 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
-from functools import cached_property, partial
+from functools import partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Set, Tuple, TypedDict, Union)
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.types
@@ -34,27 +35,36 @@ from transformers import PretrainedConfig
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.qwen2 import Qwen2Model
+from vllm.model_executor.models.utils import LLMWrapper
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import is_pp_missing_parameter
+
+_KEYS_TO_MODIFY_MAPPING = {
+    "llm.lm_head": "lm_head",
+}
 
 RawImageType = Union[Image.Image, torch.Tensor]
 
@@ -289,9 +299,10 @@ def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     def get_placeholder(image_size: Tuple[int, int], num_image: int):
         if version == (2, 0) or version == (2, 5):
-            return image_processor.get_slice_image_placeholder(image_size)
-        return image_processor.get_slice_image_placeholder(
-            image_size, num_image)
+            return image_processor. \
+                get_slice_image_placeholder(image_size)
+        return image_processor. \
+            get_slice_image_placeholder(image_size, num_image)
 
     prompt = inputs.get("prompt")
     token_ids = inputs.get("prompt_token_ids")
@@ -364,7 +375,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
             batch_data["slice_start_id"] = data[0]["slice_start_id"]
             batch_data["slice_end_id"] = data[0]["slice_end_id"]
 
-    return MultiModalKwargs(batch_data)
+    return MultiModalInputs(batch_data)
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
@@ -373,10 +384,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
-        quant_config = vllm_config.quant_config
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
         # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
@@ -386,37 +400,40 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(vllm_config=vllm_config,
-                                 prefix=maybe_prefix(prefix, "llm"))
-        self.vpm = self.init_vision_module(config,
-                                           quant_config,
-                                           prefix=maybe_prefix(prefix, "vpm"))
+        self.llm = self.init_llm(config,
+                                 cache_config,
+                                 quant_config,
+                                 prefix="llm")
+        self.vpm = self.init_vision_module(config, quant_config, prefix="vpm")
+        param_dtype = torch.get_default_dtype()
+        self.vpm.to(dtype=param_dtype)
         self.vision_dim = (self.vpm.embed_dim if self.version == (2, 0) else
                            self.vpm.embeddings.embed_dim)
         self.embed_dim = self.config.hidden_size
-
         self.resampler = self.init_resampler(self.embed_dim,
                                              self.vision_dim,
                                              quant_config=quant_config,
-                                             prefix=maybe_prefix(
-                                                 prefix, "resampler"))
+                                             prefix="resampler")
+        self.resampler.to(device="cuda", dtype=param_dtype)
+        # TODO: why is there _KEYS_TO_MODIFY_MAPPING? lm_head should be in llm
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config,
+                                      prefix="llm.lm_head")
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = Sampler()
 
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.llm, "sampler"):
-            return self.llm.sampler
-
-        return get_sampler()
 
     def get_embedding(
         self,
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        vlm_embedding: torch.Tensor = self.llm.get_input_embeddings(input_ids)
+        vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
+        if hasattr(self.config, "scale_emb"):
+            vlm_embedding *= self.config.scale_emb
 
         if image_inputs is None:  # No image
             vision_hidden_states = torch.tensor([], device=input_ids.device)
@@ -561,7 +578,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         # for `torch.compile` integration
         input_ids = None
 
-        output = self.llm.model(
+        output = self.llm(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
@@ -576,7 +593,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
 
     def sample(
         self,
@@ -586,10 +605,50 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+            use_default_weight_loading = False
+            if self.is_default_weight_loading(name):
+                use_default_weight_loading = True
+            else:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    if is_pp_missing_parameter(
+                            name.replace(weight_name, param_name), self):
+                        continue
+                    param = params_dict[name.replace(weight_name, param_name)]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    use_default_weight_loading = True
+            if use_default_weight_loading:
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -601,7 +660,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_llm(
         self,
-        vllm_config: VllmConfig,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
         raise NotImplementedError
@@ -633,19 +694,35 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
         raise NotImplementedError
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        raise NotImplementedError
+
 
 class MiniCPMV2_0(MiniCPMVBaseModel):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 0)
 
     def init_llm(
         self,
-        vllm_config: VllmConfig,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
-        return MiniCPMForCausalLM(vllm_config=vllm_config, prefix=prefix)
+
+        return LLMWrapper(MiniCPMModel(config,
+                                       cache_config=cache_config,
+                                       quant_config=quant_config,
+                                       prefix=prefix),
+                          name="model")
 
     def init_vision_module(
         self,
@@ -653,12 +730,11 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO: refactor this vision model
+        # TODO :refactor this vision model
         try:
             import timm
         except ImportError:
             raise ImportError("Please install timm==0.9.10") from ImportError
-
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
                 "vit_so400m_patch14_siglip_384.webli",
@@ -667,8 +743,6 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
-
-        model = model.to(dtype=torch.get_default_dtype())
 
         if (isinstance(model, timm.models.VisionTransformer)
                 and model.attn_pool is not None):
@@ -698,7 +772,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    quant_config=quant_config,
                                    prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler
 
     def get_vision_embedding(
         self,
@@ -729,6 +803,9 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
         return self.get_vision_embedding(pixel_values)
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name or "vpm" in name
+
 
 class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
@@ -758,6 +835,25 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     ]
 
     # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+        # vision encoder
+        ".fc1.",
+        ".fc2.",
+        # Currently, vllm does not support BNB quantization for the `out_proj`
+        # of the resampler, so it's necessary to distinguish between the
+        # vision encoder and the resampler's out_proj. The same applies to
+        # MiniCPMV2_6.
+        ".self_attn.out_proj.",  #  vision encoder out_proj
+        # resampler
+        ".kv_proj.",
+    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -770,16 +866,29 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
+        super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 5)
 
     def init_llm(
         self,
-        vllm_config: VllmConfig,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
-        return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return LLMWrapper(LlamaModel(config,
+                                     cache_config=cache_config,
+                                     quant_config=quant_config,
+                                     prefix=prefix),
+                          name="model")
 
     def init_vision_module(
         self,
@@ -806,8 +915,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      kv_dim=vision_dim,
                                      quant_config=quant_config,
                                      prefix=prefix)
-
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler
 
     def get_vision_embedding(
         self,
@@ -849,6 +957,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         return self.get_vision_embedding(all_pixel_values.type(dtype),
                                          patch_attn_mask, tgt_sizes)
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name
+
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
@@ -878,6 +989,21 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     ]
 
     # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+        # vision encoder
+        ".fc1.",
+        ".fc2.",
+        ".self_attn.out_proj.",
+        # resampler
+        ".kv_proj.",
+    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -890,16 +1016,29 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 6)
 
     def init_llm(
         self,
-        vllm_config: VllmConfig,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
-        return Qwen2ForCausalLM(vllm_config=vllm_config, prefix=prefix)
+
+        return LLMWrapper(Qwen2Model(config,
+                                     cache_config=cache_config,
+                                     quant_config=quant_config,
+                                     prefix=prefix),
+                          name="model")
 
     def init_vision_module(
         self,
@@ -927,8 +1066,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      kv_dim=vision_dim,
                                      quant_config=quant_config,
                                      prefix=prefix)
-
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler
 
     def get_vision_embedding(
         self,
@@ -976,6 +1114,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
         return self.resampler(vision_embedding, tgt_sizes)
 
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name
+
 
 _SUPPORT_VERSION = {
     (2, 0): MiniCPMV2_0,
@@ -1001,8 +1142,12 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
+    def __new__(cls,
+                config: PretrainedConfig,
+                multimodal_config: MultiModalConfig,
+                cache_config: Optional[CacheConfig] = None,
+                quant_config: Optional[QuantizationConfig] = None,
+                lora_config: Optional[LoRAConfig] = None):
         if not hasattr(config, "version"):
             if config.hidden_size == 2304 and config.query_num == 64:
                 version = (2, 0)
@@ -1016,4 +1161,5 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
         if instance_class is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config=vllm_config, prefix=prefix)
+        return instance_class(config, multimodal_config, cache_config,
+                              quant_config)

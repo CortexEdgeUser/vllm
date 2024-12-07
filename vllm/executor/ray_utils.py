@@ -234,7 +234,7 @@ def initialize_ray_cluster(
     if current_platform.is_rocm() or current_platform.is_xpu():
         # Try to connect existing ray instance and create a new one if not found
         try:
-            ray.init("auto", ignore_reinit_error=True)
+            ray.init("auto")
         except ConnectionError:
             logger.warning(
                 "No existing RAY instance detected. "
@@ -249,11 +249,7 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
-    device_str = "GPU"
-    if current_platform.is_tpu():
-        device_str = "TPU"
-    elif current_platform.is_hpu():
-        device_str = 'HPU'
+    device_str = "GPU" if not current_platform.is_tpu() else "TPU"
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:

@@ -8,7 +8,8 @@ from typing import Callable, List, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+
+from .levels import CompilationLevel
 
 
 class TorchCompileWrapperWithCustomDispatcher:
@@ -24,16 +25,20 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self,
-                 compiled_callable: Optional[Callable] = None,
-                 compilation_level: int = 0):
+    def __init__(self, compiled_callable: Optional[Callable] = None):
 
         if compiled_callable is None:
             # default compilation settings
             # compiling the forward method
 
-            backend = get_current_vllm_config(
-            ).compilation_config.init_backend()
+            # choose the compile backend
+
+            # if the user has set the backend, use it
+            from vllm.plugins import get_torch_compile_backend
+            backend = get_torch_compile_backend()
+            if backend is None:
+                from vllm.compilation.backends import select_default_backend
+                backend = select_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
 
             compiled_callable = torch.compile(
                 self.forward,
@@ -49,7 +54,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            compilation_level >= CompilationLevel.DYNAMO_ONCE
+            envs.VLLM_TORCH_COMPILE_LEVEL >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.

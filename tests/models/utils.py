@@ -5,6 +5,7 @@ import torch
 
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
+from vllm.platforms import current_platform
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
 TokensText = Tuple[List[int], str]
@@ -269,7 +270,7 @@ def build_model_context(model_name: str,
     if tokenizer_name is None:
         tokenizer_name = model_name
     if dtype is None:
-        dtype = "half"
+        dtype = "bfloat16" if current_platform.is_cpu() else "half"
 
     model_config = ModelConfig(
         model_name,

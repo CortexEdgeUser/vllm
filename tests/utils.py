@@ -15,7 +15,6 @@ import openai
 import pytest
 import requests
 import torch
-import torch.nn.functional as F
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -516,14 +515,13 @@ def compare_all_settings(model: str,
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
-                        sim = F.cosine_similarity(
-                            torch.tensor(ref_result["embedding"]),
-                            torch.tensor(compare_result["embedding"]),
-                            dim=0,
-                        )
-                        assert sim >= 0.999, (
+                        ref_embedding = torch.tensor(ref_result["embedding"])
+                        compare_embedding = torch.tensor(
+                            compare_result["embedding"])
+                        mse = ((ref_embedding - compare_embedding)**2).mean()
+                        assert mse < 1e-6, (
                             f"Embedding for {model=} are not the same.\n"
-                            f"cosine_similarity={sim}\n")
+                            f"mse={mse}\n")
                         del ref_result["embedding"]
                         del compare_result["embedding"]
                     assert ref_result == compare_result, (
@@ -701,7 +699,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
+        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
     )
 
 

@@ -121,7 +121,3 @@ class BlockSpaceManager(ABC):
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""
         pass
-
-    @abstractmethod
-    def get_num_cached_tokens(self, seq: Sequence) -> int:
-        pass

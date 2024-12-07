@@ -37,8 +37,9 @@ def load_peft_weights(model_id: str,
             Additional arguments to pass to the `hf_hub_download` method when 
             loading from the HuggingFace Hub.
     """
-    path = (os.path.join(model_id, hf_hub_download_kwargs["subfolder"]) if
-            hf_hub_download_kwargs.get("subfolder") is not None else model_id)
+    path = (os.path.join(model_id, hf_hub_download_kwargs["subfolder"])
+            if hf_hub_download_kwargs.get("subfolder", None) is not None else
+            model_id)
 
     if device is None:
         device = infer_device()
@@ -50,19 +51,19 @@ def load_peft_weights(model_id: str,
         filename = os.path.join(path, WEIGHTS_NAME)
         use_safetensors = False
     else:
-        token = hf_hub_download_kwargs.get("token")
+        token = hf_hub_download_kwargs.get("token", None)
         if token is None:
-            token = hf_hub_download_kwargs.get("use_auth_token")
+            token = hf_hub_download_kwargs.get("use_auth_token", None)
 
         hub_filename = (os.path.join(hf_hub_download_kwargs["subfolder"],
                                      SAFETENSORS_WEIGHTS_NAME)
-                        if hf_hub_download_kwargs.get("subfolder") is not None
-                        else SAFETENSORS_WEIGHTS_NAME)
+                        if hf_hub_download_kwargs.get("subfolder", None)
+                        is not None else SAFETENSORS_WEIGHTS_NAME)
         has_remote_safetensors_file = file_exists(
             repo_id=model_id,
             filename=hub_filename,
-            revision=hf_hub_download_kwargs.get("revision"),
-            repo_type=hf_hub_download_kwargs.get("repo_type"),
+            revision=hf_hub_download_kwargs.get("revision", None),
+            repo_type=hf_hub_download_kwargs.get("repo_type", None),
             token=token,
         )
         use_safetensors = has_remote_safetensors_file

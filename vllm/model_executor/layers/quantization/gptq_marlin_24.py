@@ -127,6 +127,9 @@ class GPTQMarlin24Config(QuantizationConfig):
             return GPTQMarlin24LinearMethod(self)
         return None
 
+    def get_scaled_act_names(self) -> List[str]:
+        return []
+
 
 class GPTQMarlin24LinearMethod(LinearMethodBase):
     """Linear method for Marlin24.

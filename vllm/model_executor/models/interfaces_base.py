@@ -11,8 +11,9 @@ from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.config import VllmConfig
+    from vllm.config import CacheConfig
     from vllm.model_executor.layers.pooler import PoolerOutput
+    from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -38,8 +39,10 @@ class VllmModel(Protocol[C_co, T_co]):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
-        prefix: str = "",
+        config: C_co,
+        *,
+        cache_config: Optional["CacheConfig"],
+        quant_config: Optional["QuantizationConfig"],
     ) -> None:
         ...
 
@@ -55,7 +58,20 @@ class VllmModel(Protocol[C_co, T_co]):
 
 def _check_vllm_model_init(model: Union[Type[object], object]) -> bool:
     model_init = model.__init__
-    return supports_kw(model_init, "vllm_config")
+    vllm_kws = ("cache_config", "quant_config")
+    missing_kws = tuple(kw for kw in vllm_kws
+                        if not supports_kw(model_init, kw))
+
+    if missing_kws and (isinstance(model, type)
+                        and issubclass(model, nn.Module)):
+        logger.warning(
+            "The model (%s) is missing "
+            "vLLM-specific keywords from its initializer: %s",
+            model,
+            missing_kws,
+        )
+
+    return len(missing_kws) == 0
 
 
 def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
@@ -71,7 +87,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
                         and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
-            "vLLM-specific keywords from its `forward` method: %s",
+            "vLLM-specific keywords from its initializer: %s",
             model,
             missing_kws,
         )
@@ -141,7 +157,7 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForPooling(VllmModel[C_co, T], Protocol[C_co, T]):
+class VllmModelForEmbedding(VllmModel[C_co, T], Protocol[C_co, T]):
 
     def pooler(
         self,
@@ -153,22 +169,23 @@ class VllmModelForPooling(VllmModel[C_co, T], Protocol[C_co, T]):
 
 
 @overload
-def is_pooling_model(model: Type[object]) -> TypeIs[Type[VllmModelForPooling]]:
+def is_embedding_model(
+        model: Type[object]) -> TypeIs[Type[VllmModelForEmbedding]]:
     ...
 
 
 @overload
-def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]:
+def is_embedding_model(model: object) -> TypeIs[VllmModelForEmbedding]:
     ...
 
 
-def is_pooling_model(
+def is_embedding_model(
     model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
+) -> Union[TypeIs[Type[VllmModelForEmbedding]], TypeIs[VllmModelForEmbedding]]:
     if not is_vllm_model(model):
         return False
 
     if isinstance(model, type):
-        return isinstance(model, VllmModelForPooling)
+        return isinstance(model, VllmModelForEmbedding)
 
-    return isinstance(model, VllmModelForPooling)
+    return isinstance(model, VllmModelForEmbedding)

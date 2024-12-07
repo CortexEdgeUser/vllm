@@ -112,6 +112,9 @@ class QQQConfig(QuantizationConfig):
             return QQQLinearMethod(self)
         return None
 
+    def get_scaled_act_names(self) -> List[str]:
+        return []
+
 
 class QQQLinearMethod(LinearMethodBase):
     """Linear method for QQQ.

@@ -13,7 +13,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+                             MultiModalInputs)
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -67,8 +67,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.pin_memory = is_pin_memory_available()
 
         # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 
         # Lazy initialization.
@@ -123,7 +122,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         input_block_ids: List[int] = []
 
         seq_lens: List[int] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -145,15 +144,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
-                if self.mm_registry.has_processor(self.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
-
-                multi_modal_kwargs_list.append(mm_kwargs)
+                # Process multi-modal data
+                mm_kwargs = self.multi_modal_input_mapper(
+                    mm_data,
+                    mm_processor_kwargs=seq_group_metadata.mm_processor_kwargs,
+                )
+                multi_modal_inputs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
         assert max_seq_len > 0
@@ -171,7 +167,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, input_block_ids, seq_lens,
                 multi_modal_kwargs)
@@ -318,7 +314,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
-            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
         )
 
