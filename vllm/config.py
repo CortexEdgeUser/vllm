@@ -3,7 +3,10 @@ import copy
 import enum
 import hashlib
 import json
+import os
+import pprint
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -2212,6 +2215,53 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
+class InductorHashCache:
+    """
+    Disk format: a Python list of tuples, each tuple is
+    (runtime_shape, graph_index, hash_str)
+    We use list of tuple for readability.
+
+    In-memory format: a defaultdict of dict, where the key is
+    runtime_shape, and the value is a dict of graph_index to hash_str.
+    """
+
+    def __init__(self, cache_file_path: str):
+        self.cache_file_path = cache_file_path
+        self.cache: defaultdict = defaultdict(dict)
+        if os.path.exists(self.cache_file_path):
+            with open(self.cache_file_path) as f:
+                self.deserialize(f.read())
+
+    def deserialize(self, data: str):
+        # we use ast.literal_eval to parse the data
+        # because it is a safe way to parse Python literals.
+        # do not use eval(), it is unsafe.
+        list_data = ast.literal_eval(data)
+        for runtime_shape, graph_index, hash_str in list_data:
+            self.cache[runtime_shape][graph_index] = hash_str
+
+    def serialize(self) -> str:
+        data = []
+        for runtime_shape, graph_index_to_hash_str in self.cache.items():
+            for graph_index, hash_str in graph_index_to_hash_str.items():
+                data.append((runtime_shape, graph_index, hash_str))
+        printer = pprint.PrettyPrinter(indent=4)
+        return printer.pformat(data)
+
+    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+        runtime_shape, graph_index = key
+        return runtime_shape in self.cache and graph_index in self.cache[
+            runtime_shape]
+
+    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+        runtime_shape, graph_index = key
+        return self.cache[runtime_shape][graph_index]
+
+    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+        runtime_shape, graph_index = key
+        self.cache[runtime_shape][graph_index] = value
+
+
 class CompilationConfig(BaseModel):
     """
     Configuration for compilation.
@@ -2223,6 +2273,9 @@ class CompilationConfig(BaseModel):
             - 2: dynamo once.
             - 3: piecewise compilation.
         - debug_dump_path: the path to dump the debug information.
+        - cache_dir: the directory to store the compiled graph, to
+            accelerate Inductor compilation. By default, it will use
+            model-related information to generate a cache directory.
         - backend: the backend for compilation. It needs to be a string.
             - "" (empty string): use the default backend.
             - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
@@ -2291,6 +2344,7 @@ class CompilationConfig(BaseModel):
     """ # noqa
     level: int = 0
     debug_dump_path: str = ""
+    cache_dir: str = ""
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
@@ -2354,6 +2408,9 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
     compilation_time: float = PrivateAttr
+    # should be InductorHashCache , but Pydantic does not support it
+    inductor_hash_cache: Any = PrivateAttr
+    inductor_hash_cache_path: str = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2414,6 +2471,16 @@ class CompilationConfig(BaseModel):
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
+
+        # every rank writes to its own cache dir
+        self.cache_dir = os.path.join(
+            self.cache_dir, f"rank_{vllm_config.parallel_config.rank}")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.inductor_hash_cache_path = os.path.join(self.cache_dir,
+                                                     "inductor_hash_cache.py")
+        self.inductor_hash_cache = InductorHashCache(
+            self.inductor_hash_cache_path)
+
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
@@ -2648,6 +2715,29 @@ class VllmConfig:
             logger.warning("LoRA is not supported with `torch.compile` yet. "
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.model_config is not None and \
+            not self.compilation_config.cache_dir:
+            # generate a cache directory based on the model information
+            # TODO: consider more factors that will affect model forward,
+            # and hence affect the compilation.
+            model = self.model_config.model
+            assert self.parallel_config is not None
+            tp_size = self.parallel_config.tensor_parallel_size
+            pp_size = self.parallel_config.pipeline_parallel_size
+            splitting_ops = sorted(self.compilation_config.splitting_ops)
+            compilation_factors = (tp_size, pp_size, model, splitting_ops)
+            import hashlib
+            hash_str = hashlib.md5(
+                str(compilation_factors).encode()).hexdigest()[:10]
+            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT,
+                                     "torch_compile_cache", hash_str)
+            os.makedirs(cache_dir, exist_ok=True)
+            self.compilation_config.cache_dir = cache_dir
+
+        if self.compilation_config.level == CompilationLevel.PIECEWISE:
+            logger.info("Using cache directory: %s for vLLM's torch.compile",
+                        self.compilation_config.cache_dir)
 
         current_platform.check_and_update_config(self)
 
