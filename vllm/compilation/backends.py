@@ -21,6 +21,44 @@ from .pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
+class AlwaysHitShapeEnv:
+    """
+    Why do we need this class:
+
+    For normal `torch.compile` usage, every compilation will have
+    one Dynamo bytecode compilation and one Inductor compilation.
+    The Inductor compilation happens under the context of the
+    Dynamo bytecode compilation, and that context is used to
+    determine the dynamic shape information, etc.
+
+    For our use case, we only run Dynamo bytecode compilation once,
+    and run Inductor compilation multiple times with different shapes
+    plus a general shape. The compilation for specific shapes happens
+    outside of the context of the Dynamo bytecode compilation. At that
+    time, we don't have shape environment to provide to Inductor, and
+    it will fail the Inductor code cache lookup.
+
+    By providing a dummy shape environment that always hits, we can
+    make the Inductor code cache lookup always hit, and we can
+    compile the graph for different shapes as needed.
+
+    The following dummy methods are obtained by trial-and-error
+    until it works.
+    """
+
+    def __init__(self) -> None:
+        self.guards: List[Any] = []
+
+    def evaluate_guards_expression(self, *args, **kwargs):
+        return True
+
+    def get_pruned_guards(self, *args, **kwargs):
+        return []
+
+    def produce_guards_expression(self, *args, **kwargs):
+        return ""
+
+
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
@@ -55,9 +93,58 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    compiled_graph = compile_fx(graph,
-                                example_inputs,
-                                config_patches=current_config)
+
+    cache_data = compilation_config.inductor_hash_cache
+    if (runtime_shape, graph_index) in cache_data:
+        # we compiled this graph before
+        # so we can directly lookup the compiled graph via hash
+        hash_str = cache_data[(runtime_shape, graph_index)]
+        from torch._inductor.codecache import FxGraphCache
+        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
+                   lambda *args, **kwargs: AlwaysHitShapeEnv()):
+            inductor_compiled_graph = FxGraphCache._lookup_graph(
+                hash_str, example_inputs, True, False)
+
+        # Inductor calling convention (function signature):
+        # f(list) -> tuple
+        # Dynamo calling convention (function signature):
+        # f(*args) -> Any
+
+        # need to know if the graph returns a tuple
+        from torch._inductor.compile_fx import graph_returns_tuple
+        returns_tuple = graph_returns_tuple(graph)
+
+        # this is the graph we return to Dynamo to run
+        def compiled_graph(*args):
+            # convert args to list
+            list_args = list(args)
+            graph_output = inductor_compiled_graph(list_args)
+            # unpack the tuple if needed
+            if returns_tuple:
+                return graph_output
+            else:
+                return graph_output[0]
+    else:
+        # it's the first time we compile this graph
+        # the assumption is that we don't have nested Inductor compilation.
+        # compiled_fx_graph_hash will only be called once, and we can hook
+        # it to get the hash of the compiled graph directly.
+        from torch._inductor.codecache import compiled_fx_graph_hash
+
+        def mocked_compiled_fx_graph_hash(*args, **kwargs):
+            out = compiled_fx_graph_hash(*args, **kwargs)
+            # store the hash in the cache
+            nonlocal cache_data
+            cache_data[(runtime_shape, graph_index)] = out[0]
+            return out
+
+        with patch("torch._inductor.codecache.compiled_fx_graph_hash",
+                   mocked_compiled_fx_graph_hash), patch(
+                       "torch._inductor.codecache.FxGraphCache._get_shape_env",
+                       lambda *args, **kwargs: AlwaysHitShapeEnv()):
+            compiled_graph = compile_fx(graph,
+                                        example_inputs,
+                                        config_patches=current_config)
 
     # after compiling the last graph, record the end time
     if graph_index == num_graphs - 1:
@@ -457,6 +544,12 @@ class PiecewiseBackend:
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
+
+                # save the hash of the inductor graph for the next run
+                with open(self.compilation_config.inductor_hash_cache_path,
+                          "w") as f:
+                    f.write(self.compilation_config.inductor_hash_cache.
+                            serialize())
                 end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
