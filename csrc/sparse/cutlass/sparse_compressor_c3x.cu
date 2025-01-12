@@ -18,7 +18,7 @@ using namespace cute;
 using namespace vllm;
 
 /// Make A structured sparse by replacing elements with 0 and compress it
-template <typename ElementA_, typename ElementAcc_>
+template <typename ElementAB_, typename ElementAcc_>
 bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
                              torch::Tensor const& a) {
   // Checks for conformality
@@ -34,25 +34,25 @@ bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
 
   // Sparse kernel setup; this kernel is not used for matmul,
   // but just for setting up the compressor utility
-  // A matrix configuration
-  using ElementA = ElementA_;
+
+  // A,B matrix configuration
+  using ElementAB = ElementAB_;
+  constexpr int AlignmentAB = 16;
   using LayoutTagA = cutlass::layout::RowMajor;
-  constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
-  // B matrix configuration
-  using ElementB = ElementA;
   using LayoutTagB = cutlass::layout::ColumnMajor;
-  constexpr int AlignmentB = 128 / cutlass::sizeof_bits<ElementB>::value;
+
   // C/D matrix configuration
   using ElementC = float;
   using LayoutTagC = cutlass::layout::ColumnMajor;
-  constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
+  constexpr int AlignmentC = 4;
+
   // Core kernel configurations
   using ElementAccumulator = ElementAcc_;
   using TileShape = Shape<_128, _128, _128>;
   using TileShapeRef = Shape<_128, _128, _64>;
   using ClusterShape = Shape<_1, _2, _1>;
   using KernelSchedule = typename std::conditional<
-      std::is_same_v<ElementA, cutlass::float_e4m3_t>,
+      std::is_same_v<ElementAB, cutlass::float_e4m3_t>,
       cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum,
       cutlass::gemm::KernelTmaWarpSpecialized>::type;
 
@@ -69,8 +69,8 @@ bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, ElementA,
-          LayoutTagA, AlignmentA, ElementB, LayoutTagB, AlignmentB,
+          cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, ElementAB,
+          LayoutTagA, AlignmentAB, ElementAB, LayoutTagB, AlignmentAB,
           ElementAccumulator, TileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
@@ -99,11 +99,11 @@ bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   // Offline compressor kernel
   using CompressorUtility =
       cutlass::transform::kernel::StructuredSparseCompressorUtility<
-          ProblemShape, ElementA, LayoutTagA, SparseConfig>;
+          ProblemShape, ElementAB, LayoutTagA, SparseConfig>;
 
   using CompressorKernel =
       cutlass::transform::kernel::StructuredSparseCompressor<
-          ProblemShape, ElementA, LayoutTagA, SparseConfig,
+          ProblemShape, ElementAB, LayoutTagA, SparseConfig,
           cutlass::arch::Sm90>;
 
   using Compressor =
@@ -121,9 +121,9 @@ bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   int KE = compressor_utility.get_metadata_k_physical();
   int KC = compressor_utility.get_tensorA_k_physical();
 
-  auto a_ptr = static_cast<ElementA*>(a.data_ptr());
+  auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
 
-  auto a_nzs_ptr = static_cast<ElementA*>(a_nzs.data_ptr());
+  auto a_nzs_ptr = static_cast<ElementAB*>(a_nzs.data_ptr());
   auto a_meta_ptr = static_cast<typename Gemm::CollectiveMainloop::ElementE*>(
       a_meta.data_ptr());
 

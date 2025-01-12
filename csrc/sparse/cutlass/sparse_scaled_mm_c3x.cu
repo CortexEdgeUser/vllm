@@ -17,9 +17,6 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                     torch::Tensor const& bt_meta,
                                     EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  TORCH_CHECK(bt_nzs.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
@@ -117,39 +114,14 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-void cutlass_gemm_sm90_fp16_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& bt_nzs,
-                                     torch::Tensor const& bt_meta,
-                                     EpilogueArgs&&... args) {
-  static_assert(std::is_same<InType, cutlass::half_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat16);
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
-
+void cutlass_gemm_sm90_16bit_dispatch(torch::Tensor& out,
+                                      torch::Tensor const& a,
+                                      torch::Tensor const& bt_nzs,
+                                      torch::Tensor const& bt_meta,
+                                      EpilogueArgs&&... args) {
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
 
-  // m in (128, inf)
-  return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
-      out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
-}
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue,
-          typename... EpilogueArgs>
-void cutlass_gemm_sm90_bf16_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& bt_nzs,
-                                     torch::Tensor const& bt_meta,
-                                     EpilogueArgs&&... args) {
-  static_assert(std::is_same<InType, cutlass::bfloat16_t>());
-  TORCH_CHECK(a.dtype() == torch::kBFloat16);
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  TORCH_CHECK(bt_nzs.dtype() == torch::kBFloat16);
-
-  using Cutlass3xGemmDefault =
-      typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
-
-  // m in (128, inf)
   return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
       out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
 }
@@ -162,9 +134,6 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                      torch::Tensor const& bt_meta,
                                      EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
-  TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
-  TORCH_CHECK(bt_nzs.dtype() == torch::kInt8);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
@@ -217,7 +186,6 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
                                             torch::Tensor const& bt_nzs,
                                             torch::Tensor const& bt_meta,
                                             EpilogueArgs&&... epilogue_args) {
-  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(bt_nzs.dtype() == torch::kInt8);
 
@@ -249,35 +217,20 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
     }
   } else if (a.dtype() == torch::kFloat16) {
     TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
+    TORCH_CHECK(out.dtype() == torch::kFloat16);
 
-    if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t,
-                                             cutlass::bfloat16_t, Epilogue>(
-          out, a, bt_nzs, bt_meta,
-          std::forward<EpilogueArgs>(epilogue_args)...);
-    } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t, cutlass::half_t,
-                                             Epilogue>(
-          out, a, bt_nzs, bt_meta,
-          std::forward<EpilogueArgs>(epilogue_args)...);
-    }
+    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    return cutlass_gemm_sm90_16bit_dispatch<cutlass::half_t, cutlass::half_t,
+                                            Epilogue>(
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
   } else {  // a.dtype() == torch::kBFloat16
     TORCH_CHECK(a.dtype() == torch::kBFloat16);
     TORCH_CHECK(bt_nzs.dtype() == torch::kBFloat16);
+    TORCH_CHECK(out.dtype() == torch::kBFloat16);
 
-    if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
-                                             cutlass::bfloat16_t, Epilogue>(
-          out, a, bt_nzs, bt_meta,
-          std::forward<EpilogueArgs>(epilogue_args)...);
-    } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
-                                             cutlass::half_t, Epilogue>(
-          out, a, bt_nzs, bt_meta,
-          std::forward<EpilogueArgs>(epilogue_args)...);
-    }
+    return cutlass_gemm_sm90_16bit_dispatch<cutlass::bfloat16_t,
+                                            cutlass::bfloat16_t, Epilogue>(
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
 
@@ -287,11 +240,14 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
                                    std::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
   if (bias) {
     TORCH_CHECK(bias->dtype() == out.dtype(),
-                "currently bias dtype must match output dtype ", out.dtype());
+                "CUTLASS scaled_mm bias dtype must match output dtype ",
+                 out.dtype());
     return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogueBias>(
         out, a, bt_nzs, bt_meta, b_scales, a_scales, *bias);
   } else {

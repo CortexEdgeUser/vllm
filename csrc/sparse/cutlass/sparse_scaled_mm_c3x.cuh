@@ -22,7 +22,7 @@
 using namespace cute;
 
 /*
-   This file defines sparse quantized GEMM operations using the CUTLASS 3.x API,
+   This file defines 2:4 sparse GEMM operations using the CUTLASS 3.x API,
    for NVIDIA GPUs with sm90a (Hopper) or later.
 */
 
@@ -48,15 +48,14 @@ using GemmUniversalMode = cutlass::gemm::GemmUniversalMode;
 template <typename ElementAB_, typename ElementD_,
           template <typename, typename, typename> typename Epilogue_,
           typename TileShape, typename ClusterShape, typename KernelSchedule,
-          typename EpilogueSchedule, typename AccType,
-          typename TileSchedule = cutlass::gemm::PersistentScheduler,
-          GemmUniversalMode Mode_ = GemmUniversalMode::kGemm>
+          typename EpilogueSchedule>
 struct cutlass_sparse_3x_gemm {
-  static const GemmUniversalMode Mode = Mode_;
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
-  using ElementAcc = AccType;
-
+  using ElementAcc =
+      typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
+                                float>::type;
+  
   using EpilogueDescriptor =
       cutlass::epilogue::collective::detail::EpilogueDescriptor<
           TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementD,
@@ -67,8 +66,6 @@ struct cutlass_sparse_3x_gemm {
   using ElementC = void;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = LayoutC;
-  using StrideC = cutlass::detail::TagToStrideA_t<LayoutC>;
-  using StrideD = cutlass::detail::TagToStrideA_t<LayoutD>;
 
   using LayoutC_Transpose =
       typename cutlass::layout::LayoutTranspose<LayoutC>::type;
@@ -77,19 +74,15 @@ struct cutlass_sparse_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
-  static constexpr int AlignmentA =
-      128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentB =
-      128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD =
-      128 / cutlass::sizeof_bits<ElementD>::value;
+  static constexpr int AlignmentAB = 16;
+  static constexpr int AlignmentCD = 4;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, ElementAcc, ElementC, LayoutC_Transpose, AlignmentCD,
-          ElementD, LayoutD_Transpose, AlignmentCD, EpilogueSchedule,
+          ElementAcc, float, ElementC, LayoutC_Transpose, AlignmentCD, ElementD,
+          LayoutD_Transpose, AlignmentCD, EpilogueSchedule,
           EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
@@ -101,8 +94,8 @@ struct cutlass_sparse_3x_gemm {
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, 
-          ElementAB, cutlass::layout::RowMajor, AlignmentA, 
-          ElementAB, cutlass::layout::ColumnMajor, AlignmentB, 
+          ElementAB, cutlass::layout::RowMajor, AlignmentAB, 
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentAB, 
           ElementAcc, TileShape, ClusterShape,
           Stages,
           KernelSchedule>::CollectiveOp;
@@ -110,7 +103,7 @@ struct cutlass_sparse_3x_gemm {
 
   using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
       cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-      TileSchedule>>;
+      cutlass::gemm::PersistentScheduler>>;
 
   struct GemmKernel : public KernelType {};
 };
@@ -144,9 +137,12 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
 
   using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{
-      static_cast<int>(bt_nzs.size(0)), static_cast<int>(size<0>(layout_A)),
-      static_cast<int>(size<1>(layout_A)), 1};
+
+  // M, N, K after transposition
+  int32_t m = out.size(1); 
+  int32_t n = out.size(0);
+  int32_t k = a.size(1);
+  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
@@ -192,28 +188,26 @@ struct sm90_config_default {};
 template <typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_config_default<half_t, OutType, Epilogue> {
-  // M in (128, inf)
   using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<half_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_config_default<cutlass::bfloat16_t, OutType, Epilogue> {
-  // M in (128, inf)
   using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape,
-                             ClusterShape, KernelSchedule, EpilogueSchedule,
-                             float>;
+                             ClusterShape, KernelSchedule, EpilogueSchedule>;
+
 };
 
 //////////////////////// Cherry-Picking Kernels ////////////////////////
@@ -227,7 +221,7 @@ struct sm90_fp8_config_1 {
   using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -242,7 +236,7 @@ struct sm90_fp8_config_2 {
   using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -255,7 +249,7 @@ struct sm90_fp8_config_3 {
   using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -269,7 +263,7 @@ struct sm90_fp8_config_4 {
   using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -283,7 +277,7 @@ struct sm90_fp8_config_5 {
   using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -296,7 +290,7 @@ struct sm90_fp8_config_6 {
   using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -311,7 +305,7 @@ struct sm90_fp8_config_7 {
   using ClusterShape = Shape<_1, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -326,7 +320,7 @@ struct sm90_fp8_config_8 {
   using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 ////////////////////////////////////////////////////////////////////////
 
@@ -341,7 +335,7 @@ struct sm90_config_default<cutlass::float_e4m3_t, OutType, Epilogue> {
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue,
                              TileShape, ClusterShape, KernelSchedule,
-                             EpilogueSchedule, float>;
+                             EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -355,12 +349,9 @@ struct sm90_fp8_config_M64 {
   using TileShape = Shape<_64, _64, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
-  using TileSchedule = cutlass::gemm::PersistentScheduler;
-
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float,
-                             TileSchedule>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -374,12 +365,9 @@ struct sm90_fp8_config_M128 {
   using TileShape = Shape<_64, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
-  using TileSchedule = cutlass::gemm::PersistentScheduler;
-
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float,
-                             TileSchedule>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -394,12 +382,9 @@ struct sm90_fp8_config_M256 {
   using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
-  using TileSchedule = cutlass::gemm::PersistentScheduler;
-
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float,
-                             TileSchedule>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -414,12 +399,9 @@ struct sm90_fp8_config_M512 {
   using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
-  using TileSchedule = cutlass::gemm::PersistentScheduler;
-
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float,
-                             TileSchedule>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename OutType,
@@ -433,7 +415,7 @@ struct sm90_config_default<int8_t, OutType, Epilogue> {
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<int8_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, int32_t>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -448,7 +430,7 @@ struct sm90_int8_config_M128 {
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, int32_t>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -462,7 +444,7 @@ struct sm90_int8_config_M64 {
   using ClusterShape = Shape<_1, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, int32_t>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -476,7 +458,7 @@ struct sm90_int8_config_M32_NBig {
   using ClusterShape = Shape<_1, _4, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, int32_t>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -490,7 +472,7 @@ struct sm90_int8_config_M32_NSmall {
   using ClusterShape = Shape<_1, _8, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, int32_t>;
+                             KernelSchedule, EpilogueSchedule>;
 };
 
 }  // namespace
