@@ -1,5 +1,5 @@
 """
-Define LoRA adapter for model runner.
+Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
