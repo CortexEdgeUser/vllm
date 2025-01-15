@@ -217,6 +217,7 @@ class OpenAIServingChat(OpenAIServing):
                         params=sampling_params,
                     )
                 else:
+                    sampling_params.logprobs = 1
                     generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
